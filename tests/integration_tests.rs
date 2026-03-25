@@ -3,8 +3,9 @@
 use soroban_sdk::testutils::{Address as _, Events, Ledger, LedgerInfo};
 use soroban_sdk::{vec, Address, Bytes, BytesN, Env, Symbol, Vec};
 use stellar_nebula_nomad::{
-    CellType, NebulaNomadContract, NebulaNomadContractClient, NebulaCell,
-    NebulaLayout, Rarity, ShipError, GRID_SIZE, TOTAL_CELLS,
+    Blueprint, BlueprintError, BlueprintRarity, CellType, NebulaNomadContract,
+    NebulaNomadContractClient, NebulaCell, NebulaLayout, ProfileError, ProgressUpdate, Referral,
+    ReferralError, Rarity, Session, SessionError, ShipError, GRID_SIZE, TOTAL_CELLS,
 };
 
 use proptest::prelude::*;
@@ -654,4 +655,384 @@ fn test_double_init_rejected() {
         &LEDGERS_PER_DAY,
     );
     assert_eq!(err, Err(Ok(ResourceError::AlreadyInitialized)));
+}
+
+// ─── player profile (issue #15) ───────────────────────────────────────────────
+
+#[test]
+fn test_initialize_profile_success() {
+    let (env, client, player) = setup_env();
+    let id = client.initialize_profile(&player);
+    assert_eq!(id, 1);
+}
+
+#[test]
+fn test_initialize_profile_increments_id() {
+    let (env, client, _) = setup_env();
+    let player_a = Address::generate(&env);
+    let player_b = Address::generate(&env);
+    let id_a = client.initialize_profile(&player_a);
+    let id_b = client.initialize_profile(&player_b);
+    assert_eq!(id_a, 1);
+    assert_eq!(id_b, 2);
+}
+
+#[test]
+#[should_panic]
+fn test_initialize_profile_duplicate_panics() {
+    let (env, client, player) = setup_env();
+    client.initialize_profile(&player);
+    client.initialize_profile(&player);
+}
+
+#[test]
+fn test_get_profile_returns_correct_owner() {
+    let (env, client, player) = setup_env();
+    let id = client.initialize_profile(&player);
+    let profile = client.get_profile(&id);
+    assert_eq!(profile.owner, player);
+    assert_eq!(profile.total_scans, 0);
+    assert_eq!(profile.essence_earned, 0);
+}
+
+#[test]
+#[should_panic]
+fn test_get_profile_not_found_panics() {
+    let (_env, client, _) = setup_env();
+    client.get_profile(&999u64);
+}
+
+#[test]
+fn test_update_progress_accumulates_stats() {
+    let (env, client, player) = setup_env();
+    let id = client.initialize_profile(&player);
+    client.update_progress(&player, &id, &3u32, &500i128);
+    client.update_progress(&player, &id, &2u32, &250i128);
+    let profile = client.get_profile(&id);
+    assert_eq!(profile.total_scans, 5);
+    assert_eq!(profile.essence_earned, 750);
+}
+
+#[test]
+#[should_panic]
+fn test_update_progress_wrong_caller_panics() {
+    let (env, client, player) = setup_env();
+    let intruder = Address::generate(&env);
+    let id = client.initialize_profile(&player);
+    client.update_progress(&intruder, &id, &1u32, &100i128);
+}
+
+#[test]
+fn test_batch_update_progress_applies_all() {
+    let (env, client, player) = setup_env();
+    let id = client.initialize_profile(&player);
+    let updates = soroban_sdk::vec![
+        &env,
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 100 },
+        ProgressUpdate { profile_id: id, scan_count: 2, essence: 200 },
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 50  },
+    ];
+    client.batch_update_progress(&player, &updates);
+    let profile = client.get_profile(&id);
+    assert_eq!(profile.total_scans, 4);
+    assert_eq!(profile.essence_earned, 350);
+}
+
+#[test]
+#[should_panic]
+fn test_batch_update_exceeds_limit_panics() {
+    let (env, client, player) = setup_env();
+    let id = client.initialize_profile(&player);
+    let updates = soroban_sdk::vec![
+        &env,
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 10 },
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 10 },
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 10 },
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 10 },
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 10 },
+        ProgressUpdate { profile_id: id, scan_count: 1, essence: 10 },
+    ];
+    client.batch_update_progress(&player, &updates);
+}
+
+#[test]
+fn test_profile_emits_nomad_joined_event() {
+    let (env, client, player) = setup_env();
+    client.initialize_profile(&player);
+    let events = env.events().all();
+    assert!(!events.is_empty());
+}
+
+
+// ─── session manager (issue #16) ──────────────────────────────────────────────
+
+#[test]
+fn test_start_session_success() {
+    let (env, client, player) = setup_env();
+    let session_id = client.start_session(&player, &42u64);
+    assert_eq!(session_id, 1);
+}
+
+#[test]
+fn test_start_session_records_expiry() {
+    let (env, client, player) = setup_env();
+    let session_id = client.start_session(&player, &1u64);
+    let session = client.get_session(&session_id);
+    assert_eq!(session.started_at, 1_700_000_000);
+    assert_eq!(session.expires_at, 1_700_000_000 + 86_400);
+    assert!(session.active);
+}
+
+#[test]
+fn test_start_multiple_sessions_up_to_limit() {
+    let (env, client, player) = setup_env();
+    client.start_session(&player, &1u64);
+    client.start_session(&player, &2u64);
+    let id3 = client.start_session(&player, &3u64);
+    assert_eq!(id3, 3);
+}
+
+#[test]
+#[should_panic]
+fn test_start_session_exceeds_limit_panics() {
+    let (env, client, player) = setup_env();
+    client.start_session(&player, &1u64);
+    client.start_session(&player, &2u64);
+    client.start_session(&player, &3u64);
+    client.start_session(&player, &4u64); // 4th session — must panic
+}
+
+#[test]
+fn test_expire_session_by_owner() {
+    let (env, client, player) = setup_env();
+    let id = client.start_session(&player, &1u64);
+    client.expire_session(&player, &id);
+    let session = client.get_session(&id);
+    assert!(!session.active);
+}
+
+#[test]
+fn test_expire_session_frees_slot_for_new_session() {
+    let (env, client, player) = setup_env();
+    client.start_session(&player, &1u64);
+    client.start_session(&player, &2u64);
+    let id3 = client.start_session(&player, &3u64);
+    client.expire_session(&player, &id3);
+    // slot freed — fourth session should succeed now
+    let id4 = client.start_session(&player, &4u64);
+    assert_eq!(id4, 4);
+}
+
+#[test]
+#[should_panic]
+fn test_expire_already_expired_session_panics() {
+    let (env, client, player) = setup_env();
+    let id = client.start_session(&player, &1u64);
+    client.expire_session(&player, &id);
+    client.expire_session(&player, &id); // already inactive — must panic
+}
+
+#[test]
+fn test_session_emits_started_event() {
+    let (env, client, player) = setup_env();
+    client.start_session(&player, &1u64);
+    let events = env.events().all();
+    assert!(!events.is_empty());
+}
+
+// ─── blueprint factory (issue #17) ────────────────────────────────────────────
+
+fn make_components(env: &Env, symbols: &[&str]) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+    let mut v = soroban_sdk::Vec::new(env);
+    for s in symbols {
+        v.push_back(soroban_sdk::Symbol::new(env, s));
+    }
+    v
+}
+
+#[test]
+fn test_craft_blueprint_success() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["iron", "gas"]);
+    let id = client.craft_blueprint(&player, &components);
+    assert_eq!(id, 1);
+}
+
+#[test]
+fn test_craft_blueprint_rarity_common() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["iron", "gas"]);
+    let id = client.craft_blueprint(&player, &components);
+    let bp = client.get_blueprint(&id);
+    assert_eq!(bp.rarity, BlueprintRarity::Common);
+    assert!(!bp.applied);
+}
+
+#[test]
+fn test_craft_blueprint_rarity_uncommon() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["iron", "gas", "dust", "void"]);
+    let id = client.craft_blueprint(&player, &components);
+    let bp = client.get_blueprint(&id);
+    assert_eq!(bp.rarity, BlueprintRarity::Uncommon);
+}
+
+#[test]
+fn test_craft_blueprint_rarity_rare() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["a", "b", "c", "d", "e", "f"]);
+    let id = client.craft_blueprint(&player, &components);
+    let bp = client.get_blueprint(&id);
+    assert_eq!(bp.rarity, BlueprintRarity::Rare);
+}
+
+#[test]
+#[should_panic]
+fn test_craft_blueprint_too_few_components_panics() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["iron"]); // only 1 — must panic
+    client.craft_blueprint(&player, &components);
+}
+
+#[test]
+fn test_apply_blueprint_to_ship() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["iron", "gas"]);
+    let bp_id = client.craft_blueprint(&player, &components);
+    client.apply_blueprint_to_ship(&player, &bp_id, &10u64);
+    let bp = client.get_blueprint(&bp_id);
+    assert!(bp.applied);
+}
+
+#[test]
+#[should_panic]
+fn test_apply_blueprint_twice_panics() {
+    let (env, client, player) = setup_env();
+    let components = make_components(&env, &["iron", "gas"]);
+    let bp_id = client.craft_blueprint(&player, &components);
+    client.apply_blueprint_to_ship(&player, &bp_id, &10u64);
+    client.apply_blueprint_to_ship(&player, &bp_id, &10u64); // already applied — must panic
+}
+
+#[test]
+#[should_panic]
+fn test_apply_blueprint_wrong_owner_panics() {
+    let (env, client, player) = setup_env();
+    let intruder = Address::generate(&env);
+    let components = make_components(&env, &["iron", "gas"]);
+    let bp_id = client.craft_blueprint(&player, &components);
+    client.apply_blueprint_to_ship(&intruder, &bp_id, &10u64); // not owner — must panic
+}
+
+#[test]
+fn test_batch_craft_blueprints() {
+    let (env, client, player) = setup_env();
+    let r1 = make_components(&env, &["iron", "gas"]);
+    let r2 = make_components(&env, &["dust", "void"]);
+    let mut recipes = soroban_sdk::Vec::new(&env);
+    recipes.push_back(r1);
+    recipes.push_back(r2);
+    let ids = client.batch_craft_blueprints(&player, &recipes);
+    assert_eq!(ids.len(), 2);
+}
+
+#[test]
+#[should_panic]
+fn test_batch_craft_exceeds_limit_panics() {
+    let (env, client, player) = setup_env();
+    let r = make_components(&env, &["iron", "gas"]);
+    let mut recipes = soroban_sdk::Vec::new(&env);
+    recipes.push_back(r.clone());
+    recipes.push_back(r.clone());
+    recipes.push_back(r); // 3 > MAX_BATCH_CRAFT — must panic
+    client.batch_craft_blueprints(&player, &recipes);
+}
+
+// ─── referral system (issue #19) ──────────────────────────────────────────────
+
+#[test]
+fn test_register_referral_success() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    let id = client.register_referral(&referrer, &new_nomad);
+    assert_eq!(id, 1);
+}
+
+#[test]
+fn test_get_referral_stores_correct_data() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    let referral = client.get_referral(&new_nomad);
+    assert_eq!(referral.referrer, referrer);
+    assert_eq!(referral.new_nomad, new_nomad);
+    assert!(!referral.claimed);
+    assert!(!referral.first_scan_done);
+}
+
+#[test]
+#[should_panic]
+fn test_register_referral_self_panics() {
+    let (env, client, player) = setup_env();
+    client.register_referral(&player, &player); // self-referral — must panic
+}
+
+#[test]
+#[should_panic]
+fn test_register_referral_duplicate_panics() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    client.register_referral(&referrer, &new_nomad); // already referred — must panic
+}
+
+#[test]
+fn test_mark_first_scan_and_claim_reward() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    client.mark_first_scan(&new_nomad);
+    let reward = client.claim_referral_reward(&referrer, &new_nomad);
+    assert_eq!(reward, 100);
+}
+
+#[test]
+#[should_panic]
+fn test_claim_reward_before_first_scan_panics() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    client.claim_referral_reward(&referrer, &new_nomad); // scan not done — must panic
+}
+
+#[test]
+#[should_panic]
+fn test_claim_reward_twice_panics() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    client.mark_first_scan(&new_nomad);
+    client.claim_referral_reward(&referrer, &new_nomad);
+    client.claim_referral_reward(&referrer, &new_nomad); // already claimed — must panic
+}
+
+#[test]
+fn test_referral_claimed_flag_set_after_claim() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    client.mark_first_scan(&new_nomad);
+    client.claim_referral_reward(&referrer, &new_nomad);
+    let referral = client.get_referral(&new_nomad);
+    assert!(referral.claimed);
+    assert!(referral.first_scan_done);
+}
+
+#[test]
+fn test_referral_emits_registered_event() {
+    let (env, client, referrer) = setup_env();
+    let new_nomad = Address::generate(&env);
+    client.register_referral(&referrer, &new_nomad);
+    let events = env.events().all();
+    assert!(!events.is_empty());
 }
