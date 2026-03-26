@@ -49,6 +49,26 @@ pub fn generate_theme_preview(env: Env, theme_id: Symbol) -> Result<ThemePreview
             colors: Vec::from_array(&env, [symbol_short!("A020F0"), symbol_short!("000000")]),
             particles: symbol_short!("Vortex"),
         }),
+        s if s == symbol_short!("nebula7") => Ok(ThemePreview {
+            name: symbol_short!("BlackHole"),
+            colors: Vec::from_array(&env, [symbol_short!("000000"), symbol_short!("111111")]),
+            particles: symbol_short!("Singularity"),
+        }),
+        s if s == symbol_short!("nebula8") => Ok(ThemePreview {
+            name: symbol_short!("Aurora"),
+            colors: Vec::from_array(&env, [symbol_short!("00FF00"), symbol_short!("B026FF")]),
+            particles: symbol_short!("Borealis"),
+        }),
+        s if s == symbol_short!("nebula9") => Ok(ThemePreview {
+            name: symbol_short!("Eclipse"),
+            colors: Vec::from_array(&env, [symbol_short!("CCCCCC"), symbol_short!("000000")]),
+            particles: symbol_short!("Corral"),
+        }),
+        s if s == symbol_short!("nebula10") => Ok(ThemePreview {
+            name: symbol_short!("Meteor"),
+            colors: Vec::from_array(&env, [symbol_short!("FFD700"), symbol_short!("8B4513")]),
+            particles: symbol_short!("Trails"),
+        }),
         _ => Err(ThemeError::InvalidTheme), // Only showing a few for brevity, but should have 10 presets
     }
 }
