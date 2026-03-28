@@ -166,8 +166,8 @@ fn test_batch_sizes() {
     let env = Env::default();
     let contract_id = env.register_contract(None, NebulaNomadContract);
     let client = NebulaNomadContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
+    let _admin = Address::generate(&env);
+    let _user = Address::generate(&env);
 
     // Versioning batch size
     let mut big_batch = Vec::new(&env);
@@ -178,7 +178,7 @@ fn test_batch_sizes() {
     // Expect contract error due to batch size limit (handled via contract error)
 
     // Gas recovery batch size
-    client.initialize_refund(&admin);
+    client.initialize_refund(&_admin);
     let mut big_refund_batch = Vec::new(&env);
     for _ in 0..11 {
         big_refund_batch.push_back(BytesN::from_array(&env, &[0; 32]));
@@ -191,6 +191,6 @@ fn test_batch_sizes() {
     for _ in 0..9 {
         many_inputs.push_back(symbol_short!("ore"));
     }
-    let quantities = Vec::from_array(&env, [1; 9]);
+    let _quantities = Vec::from_array(&env, [1; 9]);
     // Expect contract error due to batch size limit
 }
