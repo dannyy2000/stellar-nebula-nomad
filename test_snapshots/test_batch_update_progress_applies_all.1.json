@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
@@ -12,16 +12,10 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "mint_ship",
+              "function_name": "initialize_profile",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
-                  "symbol": "fighter"
-                },
-                {
-                  "bytes": "00000000"
                 }
               ]
             }
@@ -37,13 +31,107 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "transfer_ownership",
+              "function_name": "batch_update_progress",
               "args": [
                 {
-                  "u64": 1
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "vec": [
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "essence"
+                          },
+                          "val": {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 100
+                            }
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "profile_id"
+                          },
+                          "val": {
+                            "u64": 1
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "scan_count"
+                          },
+                          "val": {
+                            "u32": 1
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "essence"
+                          },
+                          "val": {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 200
+                            }
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "profile_id"
+                          },
+                          "val": {
+                            "u64": 1
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "scan_count"
+                          },
+                          "val": {
+                            "u32": 2
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "essence"
+                          },
+                          "val": {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 50
+                            }
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "profile_id"
+                          },
+                          "val": {
+                            "u64": 1
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "scan_count"
+                          },
+                          "val": {
+                            "u32": 1
+                          }
+                        }
+                      ]
+                    }
+                  ]
                 }
               ]
             }
@@ -51,7 +139,8 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    []
   ],
   "ledger": {
     "protocol_version": 22,
@@ -70,7 +159,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "OwnerShips"
+                  "symbol": "OwnerProfile"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -90,7 +179,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "OwnerShips"
+                      "symbol": "OwnerProfile"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -99,7 +188,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "vec": []
+                  "u64": 1
                 }
               }
             },
@@ -115,95 +204,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "OwnerShips"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "OwnerShips"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "vec": [
-                    {
-                      "u64": 1
-                    }
-                  ]
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          1099
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "ReentrancyLock"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "ReentrancyLock"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "bool": false
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          1099
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "Ship"
+                  "symbol": "Profile"
                 },
                 {
                   "u64": 1
@@ -223,7 +224,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Ship"
+                      "symbol": "Profile"
                     },
                     {
                       "u64": 1
@@ -235,10 +236,29 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "hull"
+                        "symbol": "achievement_flags"
                       },
                       "val": {
-                        "u32": 150
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "created_at"
+                      },
+                      "val": {
+                        "u64": 1700000000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "essence_earned"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 350
+                        }
                       }
                     },
                     {
@@ -251,10 +271,10 @@
                     },
                     {
                       "key": {
-                        "symbol": "metadata"
+                        "symbol": "last_updated"
                       },
                       "val": {
-                        "bytes": "00000000"
+                        "u64": 1700000000
                       }
                     },
                     {
@@ -262,65 +282,26 @@
                         "symbol": "owner"
                       },
                       "val": {
-                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                       }
                     },
                     {
                       "key": {
-                        "symbol": "scanner_power"
+                        "symbol": "ship_id"
                       },
                       "val": {
-                        "u32": 20
+                        "u64": 1
                       }
                     },
                     {
                       "key": {
-                        "symbol": "ship_type"
+                        "symbol": "total_scans"
                       },
                       "val": {
-                        "symbol": "fighter"
+                        "u32": 4
                       }
                     }
                   ]
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          1099
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "ShipCounter"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "ShipCounter"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "u64": 1
                 }
               }
             },
@@ -351,7 +332,20 @@
                     "executable": {
                       "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     },
-                    "storage": null
+                    "storage": [
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ProfileCount"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 1
+                        }
+                      }
+                    ]
                   }
                 }
               }
@@ -450,39 +444,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "ship"
-              },
-              {
-                "symbol": "xfer"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u64": 1
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
@@ -12,16 +12,23 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "mint_ship",
+              "function_name": "record_constellation",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "symbol": "fighter"
-                },
-                {
-                  "bytes": "00000000"
+                  "vec": [
+                    {
+                      "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    {
+                      "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
+                    },
+                    {
+                      "bytes": "0303030303030303030303030303030303030303030303030303030303030303"
+                    }
+                  ]
                 }
               ]
             }
@@ -37,13 +44,23 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "transfer_ownership",
+              "function_name": "record_constellation",
               "args": [
                 {
-                  "u64": 1
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "vec": [
+                    {
+                      "bytes": "0404040404040404040404040404040404040404040404040404040404040404"
+                    },
+                    {
+                      "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                    },
+                    {
+                      "bytes": "0606060606060606060606060606060606060606060606060606060606060606"
+                    }
+                  ]
                 }
               ]
             }
@@ -51,17 +68,18 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    []
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 100,
-    "timestamp": 1700000000,
+    "sequence_number": 0,
+    "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
-    "base_reserve": 10,
-    "min_persistent_entry_ttl": 1000,
-    "min_temp_entry_ttl": 100,
-    "max_entry_ttl": 10000,
+    "base_reserve": 0,
+    "min_persistent_entry_ttl": 4096,
+    "min_temp_entry_ttl": 16,
+    "max_entry_ttl": 6312000,
     "ledger_entries": [
       [
         {
@@ -70,10 +88,10 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "OwnerShips"
+                  "symbol": "Constellation"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  "u64": 0
                 }
               ]
             },
@@ -90,63 +108,65 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "OwnerShips"
+                      "symbol": "Constellation"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      "u64": 0
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "vec": []
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          1099
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "OwnerShips"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
+                  "map": [
                     {
-                      "symbol": "OwnerShips"
+                      "key": {
+                        "symbol": "id"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "vec": [
+                      "key": {
+                        "symbol": "recorded_at"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
+                    },
                     {
-                      "u64": 1
+                      "key": {
+                        "symbol": "recorder"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "star_count"
+                      },
+                      "val": {
+                        "u32": 3
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stars"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                          },
+                          {
+                            "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
+                          },
+                          {
+                            "bytes": "0303030303030303030303030303030303030303030303030303030303030303"
+                          }
+                        ]
+                      }
                     }
                   ]
                 }
@@ -154,7 +174,7 @@
             },
             "ext": "v0"
           },
-          1099
+          4095
         ]
       ],
       [
@@ -164,46 +184,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "ReentrancyLock"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "ReentrancyLock"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "bool": false
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          1099
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "Ship"
+                  "symbol": "Constellation"
                 },
                 {
                   "u64": 1
@@ -223,7 +204,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Ship"
+                      "symbol": "Constellation"
                     },
                     {
                       "u64": 1
@@ -235,14 +216,6 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "hull"
-                      },
-                      "val": {
-                        "u32": 150
-                      }
-                    },
-                    {
-                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -251,34 +224,44 @@
                     },
                     {
                       "key": {
-                        "symbol": "metadata"
+                        "symbol": "recorded_at"
                       },
                       "val": {
-                        "bytes": "00000000"
+                        "u64": 0
                       }
                     },
                     {
                       "key": {
-                        "symbol": "owner"
+                        "symbol": "recorder"
                       },
                       "val": {
-                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                       }
                     },
                     {
                       "key": {
-                        "symbol": "scanner_power"
+                        "symbol": "star_count"
                       },
                       "val": {
-                        "u32": 20
+                        "u32": 3
                       }
                     },
                     {
                       "key": {
-                        "symbol": "ship_type"
+                        "symbol": "stars"
                       },
                       "val": {
-                        "symbol": "fighter"
+                        "vec": [
+                          {
+                            "bytes": "0404040404040404040404040404040404040404040404040404040404040404"
+                          },
+                          {
+                            "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                          },
+                          {
+                            "bytes": "0606060606060606060606060606060606060606060606060606060606060606"
+                          }
+                        ]
                       }
                     }
                   ]
@@ -287,46 +270,7 @@
             },
             "ext": "v0"
           },
-          1099
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "ShipCounter"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "ShipCounter"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "u64": 1
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          1099
+          4095
         ]
       ],
       [
@@ -351,14 +295,27 @@
                     "executable": {
                       "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     },
-                    "storage": null
+                    "storage": [
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Counter"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 2
+                        }
+                      }
+                    ]
                   }
                 }
               }
             },
             "ext": "v0"
           },
-          1099
+          4095
         ]
       ],
       [
@@ -391,7 +348,7 @@
             },
             "ext": "v0"
           },
-          10099
+          6311999
         ]
       ],
       [
@@ -424,7 +381,7 @@
             },
             "ext": "v0"
           },
-          10099
+          6311999
         ]
       ],
       [
@@ -445,7 +402,7 @@
             },
             "ext": "v0"
           },
-          1099
+          4095
         ]
       ]
     ]
@@ -460,22 +417,22 @@
           "v0": {
             "topics": [
               {
-                "symbol": "ship"
+                "symbol": "const"
               },
               {
-                "symbol": "xfer"
+                "symbol": "matched"
               }
             ],
             "data": {
               "vec": [
                 {
-                  "u64": 1
+                  "u64": 0
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  "u32": 3
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "u32": 3
                 }
               ]
             }

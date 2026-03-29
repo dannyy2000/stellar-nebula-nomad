@@ -37,6 +37,11 @@ mod escrow_trader;
 mod storage_optim;
 mod state_snapshot;
 
+mod prize_distributor;
+mod portal_registry;
+mod constellation_mapper;
+mod entanglement_comms;
+
 pub use nebula_explorer::{
     calculate_rarity_tier, compute_layout_hash, generate_nebula_layout, CellType, NebulaCell,
     NebulaLayout, Rarity, GRID_SIZE, TOTAL_CELLS,
@@ -122,6 +127,27 @@ pub use state_snapshot::{
     take_snapshot, restore_from_snapshot, get_snapshot, get_ship_snapshots,
     auto_snapshot, reset_session_count, StateSnapshot, SnapshotError,
     RestoreResult, MAX_SNAPSHOTS_PER_SESSION, SNAPSHOT_TTL, AUTO_SNAPSHOT_INTERVAL,
+};
+pub use prize_distributor::{
+    initialize_prize_distributor, fund_prize_pool, submit_leaderboard_snapshot,
+    distribute_weekly_prizes, get_prize_pool, get_total_distributed, get_last_reset,
+    PrizeError, PrizeRecord, WEEK_SECONDS, MAX_PAYOUT_POSITIONS,
+};
+pub use portal_registry::{
+    initialize_portal_registry, register_portal, register_portal_batch, query_portal_status,
+    refresh_portal, travel_through_portal, get_portal,
+    PortalError, Portal, MAX_PORTALS_PER_TX, MIN_STABLE_PCT, BASE_TRAVEL_COST,
+};
+pub use constellation_mapper::{
+    record_constellation, match_constellation, match_constellations_batch,
+    get_constellation, get_constellation_count,
+    ConstellationError, Constellation, MatchResult, MIN_STARS, MAX_MATCH_BURST,
+};
+pub use entanglement_comms::{
+    create_entanglement_pair, send_entangled_message, send_entangled_message_batch,
+    dissolve_pair, get_entanglement_pair, get_message_count,
+    EntanglementError, EntanglementPair, EntangledMessage,
+    PAIR_LIFETIME_SECS, MAX_MESSAGE_BURST,
 };
 
 #[contract]
@@ -918,5 +944,148 @@ impl NebulaNomadContract {
     /// Reset snapshot session counter for a ship.
     pub fn reset_session_count(env: Env, ship_id: u64) {
         state_snapshot::reset_session_count(&env, ship_id)
+    }
+
+    // ─── Prize Distributor (Issue #62) ───────────────────────────────────
+
+    /// Initialize the weekly prize distributor. One-time setup.
+    pub fn initialize_prize_distributor(env: Env, admin: Address) {
+        prize_distributor::initialize_prize_distributor(&env, &admin)
+    }
+
+    /// Add funds to the prize pool (sponsor-funded pools supported).
+    pub fn fund_prize_pool(env: Env, funder: Address, amount: i128) -> Result<i128, PrizeError> {
+        prize_distributor::fund_prize_pool(&env, &funder, amount)
+    }
+
+    /// Admin: record the current leaderboard snapshot for payout.
+    pub fn submit_leaderboard_snapshot(
+        env: Env,
+        admin: Address,
+        winners: Vec<Address>,
+    ) -> Result<u32, PrizeError> {
+        prize_distributor::submit_leaderboard_snapshot(&env, &admin, &winners)
+    }
+
+    /// Distribute weekly prizes to the top N positions (max 50 per tx).
+    pub fn distribute_weekly_prizes(
+        env: Env,
+        caller: Address,
+        top_n: u32,
+    ) -> Result<Vec<PrizeRecord>, PrizeError> {
+        prize_distributor::distribute_weekly_prizes(&env, &caller, top_n)
+    }
+
+    /// Return current prize pool balance.
+    pub fn get_prize_pool(env: Env) -> i128 {
+        prize_distributor::get_prize_pool(&env)
+    }
+
+    /// Return total prizes distributed all-time.
+    pub fn get_total_distributed(env: Env) -> i128 {
+        prize_distributor::get_total_distributed(&env)
+    }
+
+    // ─── Portal Registry (Issue #71) ─────────────────────────────────────
+
+    /// Initialize the inter-nebula portal registry.
+    pub fn initialize_portal_registry(env: Env, admin: Address) {
+        portal_registry::initialize_portal_registry(&env, &admin)
+    }
+
+    /// Register a new portal between two nebulae.
+    pub fn register_portal(
+        env: Env,
+        owner: Address,
+        source_nebula: u64,
+        target_nebula: u64,
+    ) -> Result<u64, PortalError> {
+        portal_registry::register_portal(&env, &owner, source_nebula, target_nebula)
+    }
+
+    /// Query stability percentage and travel cost for a portal.
+    pub fn query_portal_status(env: Env, portal_id: u64) -> Result<(u32, i128), PortalError> {
+        portal_registry::query_portal_status(&env, portal_id)
+    }
+
+    /// Refresh a portal's stability back to 100%.
+    pub fn refresh_portal(env: Env, owner: Address, portal_id: u64) -> Result<(), PortalError> {
+        portal_registry::refresh_portal(&env, &owner, portal_id)
+    }
+
+    /// Attempt travel through a portal.
+    pub fn travel_through_portal(env: Env, portal_id: u64) -> Result<i128, PortalError> {
+        portal_registry::travel_through_portal(&env, portal_id)
+    }
+
+    // ─── Constellation Mapper (Issue #72) ────────────────────────────────
+
+    /// Record a new star constellation pattern on-chain.
+    pub fn record_constellation(
+        env: Env,
+        recorder: Address,
+        stars: Vec<BytesN<32>>,
+    ) -> Result<u64, ConstellationError> {
+        constellation_mapper::record_constellation(&env, &recorder, &stars)
+    }
+
+    /// Find the best matching known constellation for an observed pattern.
+    pub fn match_constellation(
+        env: Env,
+        observed: Vec<BytesN<32>>,
+    ) -> Result<MatchResult, ConstellationError> {
+        constellation_mapper::match_constellation(&env, &observed)
+    }
+
+    /// Return total recorded constellations.
+    pub fn get_constellation_count(env: Env) -> u64 {
+        constellation_mapper::get_constellation_count(&env)
+    }
+
+    // ─── Quantum Entanglement Comms (Issue #73) ───────────────────────────
+
+    /// Establish an entanglement pair between two ships.
+    pub fn create_entanglement_pair(
+        env: Env,
+        owner_a: Address,
+        ship_a: u64,
+        owner_b: Address,
+        ship_b: u64,
+    ) -> Result<u64, EntanglementError> {
+        entanglement_comms::create_entanglement_pair(&env, &owner_a, ship_a, &owner_b, ship_b)
+    }
+
+    /// Send a single encrypted message over an active pair.
+    pub fn send_entangled_message(
+        env: Env,
+        caller: Address,
+        pair_id: u64,
+        message: BytesN<64>,
+    ) -> Result<u64, EntanglementError> {
+        entanglement_comms::send_entangled_message(&env, &caller, pair_id, &message)
+    }
+
+    /// Send up to 20 messages in one transaction.
+    pub fn send_entangled_message_batch(
+        env: Env,
+        caller: Address,
+        pair_id: u64,
+        messages: Vec<BytesN<64>>,
+    ) -> Result<u64, EntanglementError> {
+        entanglement_comms::send_entangled_message_batch(&env, &caller, pair_id, &messages)
+    }
+
+    /// Dissolve an entanglement pair.
+    pub fn dissolve_pair(
+        env: Env,
+        caller: Address,
+        pair_id: u64,
+    ) -> Result<(), EntanglementError> {
+        entanglement_comms::dissolve_pair(&env, &caller, pair_id)
+    }
+
+    /// Return total messages sent over a pair.
+    pub fn get_message_count(env: Env, pair_id: u64) -> u64 {
+        entanglement_comms::get_message_count(&env, pair_id)
     }
 }
