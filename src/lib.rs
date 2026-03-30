@@ -45,6 +45,10 @@ mod prize_distributor;
 mod portal_registry;
 mod constellation_mapper;
 mod entanglement_comms;
+mod wormhole_traveler;
+mod alliance_manager;
+mod market_oracle;
+mod audio_seed_generator;
 
 pub use nebula_explorer::{
     calculate_rarity_tier, compute_layout_hash, generate_nebula_layout, CellType, NebulaCell,
@@ -156,6 +160,27 @@ pub use entanglement_comms::{
     dissolve_pair, get_entanglement_pair, get_message_count,
     EntanglementError, EntanglementPair, EntangledMessage,
     PAIR_LIFETIME_SECS, MAX_MESSAGE_BURST,
+};
+pub use wormhole_traveler::{
+    open_wormhole, traverse_wormhole, get_wormhole, get_active_wormholes,
+    get_travel_history, cleanup_expired_wormholes, calculate_travel_cost,
+    verify_wormhole_link, Wormhole, TravelRecord, WormholeError,
+    MAX_SIMULTANEOUS_WORMHOLES, WORMHOLE_LIFETIME_SECS,
+};
+pub use alliance_manager::{
+    found_alliance, join_alliance, leave_alliance, contribute_to_treasury,
+    get_alliance, get_alliance_treasury, get_member_contribution, get_player_alliance,
+    Alliance, MembershipRecord, AllianceError, MAX_MEMBERS_PER_ALLIANCE,
+};
+pub use market_oracle::{
+    initialize_oracle, update_resource_price, batch_update_prices,
+    get_current_market_rate, get_price_data, get_price_history, add_oracle_source,
+    PriceData, OracleError as MarketOracleError, MAX_BATCH_UPDATE,
+};
+pub use audio_seed_generator::{
+    initialize_presets, generate_music_seed, get_instrument_layer, get_all_layers,
+    get_nebula_seed, get_preset, MusicSeed, InstrumentParams, AudioError,
+    INSTRUMENT_PRESETS, MAX_LAYERS_PER_NEBULA,
 };
 
 #[contract]
@@ -1230,5 +1255,239 @@ impl NebulaNomadContract {
     /// Return total messages sent over a pair.
     pub fn get_message_count(env: Env, pair_id: u64) -> u64 {
         entanglement_comms::get_message_count(&env, pair_id)
+    }
+
+    // ─── Inter-Nebula Wormhole Travel System (Issue #77) ─────────────────────
+
+    /// Open a new wormhole between two nebulae with verifiable travel link.
+    pub fn open_wormhole(
+        env: Env,
+        creator: Address,
+        origin_nebula: u64,
+        destination: u64,
+    ) -> Result<u64, WormholeError> {
+        let result = wormhole_traveler::open_wormhole(&env, creator.clone(), origin_nebula, destination);
+        if result.is_ok() {
+            let mut details = [0u8; 128];
+            details[0..8].copy_from_slice(&origin_nebula.to_be_bytes());
+            details[8..16].copy_from_slice(&destination.to_be_bytes());
+            let details_bytes = BytesN::from_array(&env, &details);
+            let _ = audit_logger::log_audit_event(&env, Some(&creator), symbol_short!("ow"), details_bytes);
+        }
+        result
+    }
+
+    /// Traverse an existing wormhole with energy cost validation and state sync.
+    pub fn traverse_wormhole(
+        env: Env,
+        traveler: Address,
+        ship_id: u64,
+        wormhole_id: u64,
+    ) -> Result<TravelRecord, WormholeError> {
+        let result = wormhole_traveler::traverse_wormhole(&env, traveler.clone(), ship_id, wormhole_id);
+        if result.is_ok() {
+            let mut details = [0u8; 128];
+            details[0..8].copy_from_slice(&ship_id.to_be_bytes());
+            details[8..16].copy_from_slice(&wormhole_id.to_be_bytes());
+            let details_bytes = BytesN::from_array(&env, &details);
+            let _ = audit_logger::log_audit_event(&env, Some(&traveler), symbol_short!("tw"), details_bytes);
+        }
+        result
+    }
+
+    /// Get wormhole details by ID.
+    pub fn get_wormhole(env: Env, wormhole_id: u64) -> Option<Wormhole> {
+        wormhole_traveler::get_wormhole(&env, wormhole_id)
+    }
+
+    /// Get all active wormholes.
+    pub fn get_active_wormholes(env: Env) -> Vec<u64> {
+        wormhole_traveler::get_active_wormholes(&env)
+    }
+
+    /// Get travel history for a ship.
+    pub fn get_travel_history(env: Env, ship_id: u64) -> Vec<TravelRecord> {
+        wormhole_traveler::get_travel_history(&env, ship_id)
+    }
+
+    /// Clean up expired wormholes (maintenance function).
+    pub fn cleanup_expired_wormholes(env: Env) -> u32 {
+        let cleaned = wormhole_traveler::cleanup_expired_wormholes(&env);
+        let mut details = [0u8; 128];
+        details[0..4].copy_from_slice(&cleaned.to_be_bytes());
+        let details_bytes = BytesN::from_array(&env, &details);
+        let _ = audit_logger::log_audit_event(&env, None, symbol_short!("cw"), details_bytes);
+        cleaned
+    }
+
+    /// Calculate travel cost between two nebulae.
+    pub fn calculate_travel_cost(env: Env, origin_nebula: u64, destination: u64) -> u32 {
+        wormhole_traveler::calculate_travel_cost(origin_nebula, destination)
+    }
+
+    /// Verify wormhole link integrity.
+    pub fn verify_wormhole_link(env: Env, wormhole_id: u64, provided_link: BytesN<32>) -> bool {
+        wormhole_traveler::verify_wormhole_link(&env, wormhole_id, provided_link)
+    }
+
+    // ─── Player Alliance and Faction System (Issue #79) ──────────────────
+
+    /// Found a new alliance with initial treasury.
+    pub fn found_alliance(
+        env: Env,
+        founder: Address,
+        name: String,
+    ) -> Result<u64, AllianceError> {
+        let result = alliance_manager::found_alliance(&env, founder.clone(), name);
+        if result.is_ok() {
+            let mut details = [0u8; 128];
+            if let Ok(alliance_id) = result {
+                details[0..8].copy_from_slice(&alliance_id.to_be_bytes());
+            }
+            let details_bytes = BytesN::from_array(&env, &details);
+            let _ = audit_logger::log_audit_event(&env, Some(&founder), symbol_short!("fa"), details_bytes);
+        }
+        result
+    }
+
+    /// Join an existing alliance.
+    pub fn join_alliance(
+        env: Env,
+        alliance_id: u64,
+        player: Address,
+    ) -> Result<MembershipRecord, AllianceError> {
+        let result = alliance_manager::join_alliance(&env, alliance_id, player.clone());
+        if result.is_ok() {
+            let mut details = [0u8; 128];
+            details[0..8].copy_from_slice(&alliance_id.to_be_bytes());
+            let details_bytes = BytesN::from_array(&env, &details);
+            let _ = audit_logger::log_audit_event(&env, Some(&player), symbol_short!("ja"), details_bytes);
+        }
+        result
+    }
+
+    /// Leave an alliance.
+    pub fn leave_alliance(env: Env, player: Address) -> Result<(), AllianceError> {
+        alliance_manager::leave_alliance(&env, player)
+    }
+
+    /// Contribute resources to alliance treasury.
+    pub fn contribute_to_treasury(
+        env: Env,
+        player: Address,
+        amount: i128,
+    ) -> Result<i128, AllianceError> {
+        alliance_manager::contribute_to_treasury(&env, player, amount)
+    }
+
+    /// Get alliance details.
+    pub fn get_alliance(env: Env, alliance_id: u64) -> Result<Alliance, AllianceError> {
+        alliance_manager::get_alliance(&env, alliance_id)
+    }
+
+    /// Get alliance treasury balance.
+    pub fn get_alliance_treasury(env: Env, alliance_id: u64) -> i128 {
+        alliance_manager::get_alliance_treasury(&env, alliance_id)
+    }
+
+    /// Get member's contribution to alliance.
+    pub fn get_member_contribution(env: Env, alliance_id: u64, member: Address) -> i128 {
+        alliance_manager::get_member_contribution(&env, alliance_id, member)
+    }
+
+    /// Get player's current alliance ID.
+    pub fn get_player_alliance(env: Env, player: Address) -> Option<u64> {
+        alliance_manager::get_player_alliance(&env, player)
+    }
+
+    // ─── Dynamic Resource Market Oracle Integration (Issue #78) ──────────
+
+    /// Initialize the market oracle with admin and default sources.
+    pub fn initialize_oracle(
+        env: Env,
+        admin: Address,
+        sources: Vec<Address>,
+    ) -> Result<(), MarketOracleError> {
+        market_oracle::initialize_oracle(&env, admin, sources)
+    }
+
+    /// Update resource price with timestamp verification.
+    pub fn update_resource_price(
+        env: Env,
+        admin: Address,
+        resource: Symbol,
+        new_price: i128,
+    ) -> Result<PriceData, MarketOracleError> {
+        market_oracle::update_resource_price(&env, admin, resource, new_price)
+    }
+
+    /// Batch update multiple resource prices.
+    pub fn batch_update_prices(
+        env: Env,
+        admin: Address,
+        resources: Vec<Symbol>,
+        prices: Vec<i128>,
+    ) -> Result<Vec<PriceData>, MarketOracleError> {
+        market_oracle::batch_update_prices(&env, admin, resources, prices)
+    }
+
+    /// Get current market rate for a resource (pure view).
+    pub fn get_current_market_rate(env: Env, resource: Symbol) -> Result<i128, MarketOracleError> {
+        market_oracle::get_current_market_rate(&env, resource)
+    }
+
+    /// Get price data with metadata.
+    pub fn get_price_data(env: Env, resource: Symbol) -> Result<PriceData, MarketOracleError> {
+        market_oracle::get_price_data(&env, resource)
+    }
+
+    /// Get 24h price history for a resource.
+    pub fn get_price_history(env: Env, resource: Symbol) -> Vec<PriceData> {
+        market_oracle::get_price_history(&env, resource)
+    }
+
+    /// Add oracle source (admin only).
+    pub fn add_oracle_source(
+        env: Env,
+        admin: Address,
+        new_source: Address,
+    ) -> Result<(), MarketOracleError> {
+        market_oracle::add_oracle_source(&env, admin, new_source)
+    }
+
+    // ─── Procedural Music and Sound Seed Generator (Issue #80) ───────────
+
+    /// Initialize default instrument presets.
+    pub fn initialize_presets(env: Env) {
+        audio_seed_generator::initialize_presets(&env)
+    }
+
+    /// Generate deterministic music seed from nebula state.
+    pub fn generate_music_seed(env: Env, nebula_id: u64) -> Result<MusicSeed, AudioError> {
+        audio_seed_generator::generate_music_seed(&env, nebula_id)
+    }
+
+    /// Get instrument layer parameters for frontend rendering.
+    pub fn get_instrument_layer(
+        env: Env,
+        seed: BytesN<32>,
+        layer: u32,
+    ) -> Result<InstrumentParams, AudioError> {
+        audio_seed_generator::get_instrument_layer(&env, seed, layer)
+    }
+
+    /// Get all 8 layers for a nebula instantly.
+    pub fn get_all_layers(env: Env, nebula_id: u64) -> Result<Vec<InstrumentParams>, AudioError> {
+        audio_seed_generator::get_all_layers(&env, nebula_id)
+    }
+
+    /// Get stored seed for a nebula.
+    pub fn get_nebula_seed(env: Env, nebula_id: u64) -> Option<BytesN<32>> {
+        audio_seed_generator::get_nebula_seed(&env, nebula_id)
+    }
+
+    /// Get instrument preset by ID.
+    pub fn get_preset(env: Env, preset_id: u32) -> Result<InstrumentParams, AudioError> {
+        audio_seed_generator::get_preset(&env, preset_id)
     }
 }
