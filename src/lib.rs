@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Symbol, Vec, symbol_short};
 
 mod blueprint_factory;
 mod gifting_system;
@@ -34,6 +34,18 @@ mod energy_manager;
 mod environment_simulator;
 mod mission_generator;
 mod escrow_trader;
+mod audit_logger;
+mod sustainability_metrics;
+mod anomaly_classifier;
+mod shared_lib;
+
+mod storage_optim;
+mod state_snapshot;
+
+mod prize_distributor;
+mod portal_registry;
+mod constellation_mapper;
+mod entanglement_comms;
 
 pub use nebula_explorer::{
     calculate_rarity_tier, compute_layout_hash, generate_nebula_layout, CellType, NebulaCell,
@@ -109,6 +121,44 @@ pub use escrow_trader::{
     cancel_escrow, complete_escrow, confirm_escrow, get_escrow, initiate_escrow, Escrow,
     EscrowError, EscrowResult, TradeAsset,
 };
+pub use audit_logger::{AuditEntry, AuditLoggerError, get_audit_count, log_audit_event, query_audit_logs};
+pub use sustainability_metrics::{claim_sustainability_reward, get_footprint, record_transaction_footprint, FootprintRecord, SustainabilityError};
+pub use anomaly_classifier::{classify_anomaly, classify_batch, get_classification, refine_classification, AnomalyError, ClassificationRecord};
+pub use shared_lib::{calculate_yield, validate_address, SharedError};
+
+pub use storage_optim::{
+    store_with_bump, get_optimized_entry, batch_store_with_bump, guard_reentrancy,
+    release_guard, store_ship_nebula, get_ship_nebula, initialize_bump_config,
+    update_bump_config, get_bump_config, set_upgrade_target, get_upgrade_target,
+    reset_burst_counter, StorageError, OptimizedEntry, ShipNebulaData, OptimResult,
+    BumpConfig, DEFAULT_BUMP_TTL, MAX_BUMP_TTL, MAX_BURST_READS,
+};
+pub use state_snapshot::{
+    take_snapshot, restore_from_snapshot, get_snapshot, get_ship_snapshots,
+    auto_snapshot, reset_session_count, StateSnapshot, SnapshotError,
+    RestoreResult, MAX_SNAPSHOTS_PER_SESSION, SNAPSHOT_TTL, AUTO_SNAPSHOT_INTERVAL,
+};
+pub use prize_distributor::{
+    initialize_prize_distributor, fund_prize_pool, submit_leaderboard_snapshot,
+    distribute_weekly_prizes, get_prize_pool, get_total_distributed, get_last_reset,
+    PrizeError, PrizeRecord, WEEK_SECONDS, MAX_PAYOUT_POSITIONS,
+};
+pub use portal_registry::{
+    initialize_portal_registry, register_portal, register_portal_batch, query_portal_status,
+    refresh_portal, travel_through_portal, get_portal,
+    PortalError, Portal, MAX_PORTALS_PER_TX, MIN_STABLE_PCT, BASE_TRAVEL_COST,
+};
+pub use constellation_mapper::{
+    record_constellation, match_constellation, match_constellations_batch,
+    get_constellation, get_constellation_count,
+    ConstellationError, Constellation, MatchResult, MIN_STARS, MAX_MATCH_BURST,
+};
+pub use entanglement_comms::{
+    create_entanglement_pair, send_entangled_message, send_entangled_message_batch,
+    dissolve_pair, get_entanglement_pair, get_message_count,
+    EntanglementError, EntanglementPair, EntangledMessage,
+    PAIR_LIFETIME_SECS, MAX_MESSAGE_BURST,
+};
 
 #[contract]
 pub struct NebulaNomadContract;
@@ -183,11 +233,17 @@ impl NebulaNomadContract {
     }
 
     pub fn post_bounty(env: Env, poster: Address, description: String, reward: i128) -> Bounty {
-        bounty_board::post_bounty(&env, &poster, description, reward).unwrap()
+        let result = bounty_board::post_bounty(&env, &poster, description, reward).unwrap();
+        let _ = audit_logger::log_audit_event(&env, Some(&poster), symbol_short!("pb"), BytesN::from_array(&env, &[0u8; 128]));
+        result
     }
 
     pub fn claim_bounty(env: Env, claimer: Address, bounty_id: u64, proof: BytesN<32>) -> Bounty {
-        bounty_board::claim_bounty(&env, &claimer, bounty_id, proof).unwrap()
+        let result = bounty_board::claim_bounty(&env, &claimer, bounty_id, proof).unwrap();
+        let mut b = [0u8; 128];
+        b[0..8].copy_from_slice(&bounty_id.to_be_bytes());
+        let _ = audit_logger::log_audit_event(&env, Some(&claimer), symbol_short!("cb"), BytesN::from_array(&env, &b));
+        result
     }
 
     // === Recycling/Crafting API ===
@@ -197,11 +253,17 @@ impl NebulaNomadContract {
     }
 
     pub fn recycle_resource(env: Env, caller: Address, resource: Symbol, amount: u32) -> Vec<(Symbol, u32)> {
-        recycling_crafter::recycle_resource(&env, &caller, resource, amount).unwrap()
+        let result = recycling_crafter::recycle_resource(&env, &caller, resource, amount).unwrap();
+        let _ = audit_logger::log_audit_event(&env, Some(&caller), symbol_short!("rr"), BytesN::from_array(&env, &[0u8; 128]));
+        result
     }
 
     pub fn craft_new_item(env: Env, caller: Address, recipe_id: u64, inputs: Vec<Symbol>, quantities: Vec<u32>) -> CraftingResult {
-        recycling_crafter::craft_new_item(&env, &caller, recipe_id, inputs, quantities).unwrap()
+        let result = recycling_crafter::craft_new_item(&env, &caller, recipe_id, inputs, quantities).unwrap();
+        let mut b = [0u8; 128];
+        b[0..8].copy_from_slice(&recipe_id.to_be_bytes());
+        let _ = audit_logger::log_audit_event(&env, Some(&caller), symbol_short!("cn"), BytesN::from_array(&env, &b));
+        result
     }
 
     pub fn get_recipe(env: Env, recipe_id: u64) -> Recipe {
@@ -216,7 +278,12 @@ impl NebulaNomadContract {
         ship_type: Symbol,
         metadata: Bytes,
     ) -> Result<ShipNft, ShipError> {
-        ship_nft::mint_ship(&env, &owner, &ship_type, &metadata)
+        let result = ship_nft::mint_ship(&env, &owner, &ship_type, &metadata);
+        if result.is_ok() {
+            let details = BytesN::from_array(&env, &[0u8; 128]);
+            let _ = audit_logger::log_audit_event(&env, Some(&owner), symbol_short!("ms"), details);
+        }
+        result
     }
 
     /// Batch-mint up to 3 ship NFTs.
@@ -226,7 +293,12 @@ impl NebulaNomadContract {
         ship_types: Vec<Symbol>,
         metadata: Bytes,
     ) -> Result<Vec<ShipNft>, ShipError> {
-        ship_nft::batch_mint_ships(&env, &owner, &ship_types, &metadata)
+        let result = ship_nft::batch_mint_ships(&env, &owner, &ship_types, &metadata);
+        if result.is_ok() {
+            let details = BytesN::from_array(&env, &[0u8; 128]);
+            let _ = audit_logger::log_audit_event(&env, Some(&owner), symbol_short!("bms"), details);
+        }
+        result
     }
 
     /// Transfer ship ownership.
@@ -235,7 +307,14 @@ impl NebulaNomadContract {
         ship_id: u64,
         new_owner: Address,
     ) -> Result<ShipNft, ShipError> {
-        ship_nft::transfer_ownership(&env, ship_id, &new_owner)
+        let result = ship_nft::transfer_ownership(&env, ship_id, &new_owner);
+        if result.is_ok() {
+            let mut b = [0u8; 128];
+            b[0..8].copy_from_slice(&ship_id.to_be_bytes());
+            let details = BytesN::from_array(&env, &b);
+            let _ = audit_logger::log_audit_event(&env, Some(&new_owner), symbol_short!("to"), details);
+        }
+        result
     }
 
     /// Read a ship by ID.
@@ -298,12 +377,24 @@ impl NebulaNomadContract {
         ship_id: u64,
         amount: u64,
     ) -> Result<TreasureVault, VaultError> {
-        treasure_vault::deposit_treasure(&env, &owner, ship_id, amount)
+        let result = treasure_vault::deposit_treasure(&env, &owner, ship_id, amount);
+        if result.is_ok() {
+            let mut b = [0u8; 128];
+            b[0..8].copy_from_slice(&ship_id.to_be_bytes());
+            let _ = audit_logger::log_audit_event(&env, Some(&owner), symbol_short!("dt"), BytesN::from_array(&env, &b));
+        }
+        result
     }
 
     /// Claim a treasure vault after the lock period expires.
     pub fn claim_treasure(env: Env, owner: Address, vault_id: u64) -> Result<u64, VaultError> {
-        treasure_vault::claim_treasure(&env, &owner, vault_id)
+        let result = treasure_vault::claim_treasure(&env, &owner, vault_id);
+        if result.is_ok() {
+            let mut b = [0u8; 128];
+            b[0..8].copy_from_slice(&vault_id.to_be_bytes());
+            let _ = audit_logger::log_audit_event(&env, Some(&owner), symbol_short!("ct"), BytesN::from_array(&env, &b));
+        }
+        result
     }
 
     /// Read a vault by ID.
@@ -789,5 +880,371 @@ impl NebulaNomadContract {
     /// Clear the player's pending batch queue.
     pub fn clear_batch(env: Env, player: Address) {
         batch_processor::clear_batch(&env, &player)
+    }
+
+// ─── On-chain Audit Logging (Issue #64) ───────────────────────────────
+
+    pub fn log_audit_event(
+        env: Env,
+        actor: Option<Address>,
+        action: Symbol,
+        details: BytesN<128>,
+    ) -> Result<AuditEntry, AuditLoggerError> {
+        audit_logger::log_audit_event(&env, actor.as_ref(), action, details)
+    }
+
+    pub fn query_audit_logs(env: Env, filter: Symbol, limit: u32) -> Vec<AuditEntry> {
+        audit_logger::query_audit_logs(&env, filter, limit)
+    }
+
+    pub fn get_audit_count(env: Env) -> u64 {
+        audit_logger::get_audit_count(&env)
+    }
+
+    // ─── Sustainability and Carbon Tracking (Issue #68) ──────────────────
+
+    pub fn record_transaction_footprint(
+        env: Env,
+        player: Address,
+        gas_used: u64,
+    ) -> FootprintRecord {
+        let record = sustainability_metrics::record_transaction_footprint(&env, &player, gas_used)
+            .unwrap();
+        let mut details_bytes = [0u8; 128];
+        details_bytes[0..8].copy_from_slice(&record.gas_used.to_be_bytes());
+        let details = BytesN::from_array(&env, &details_bytes);
+        let _ = audit_logger::log_audit_event(&env, Some(&player), symbol_short!("ec"), details);
+        record
+    }
+
+    pub fn claim_sustainability_reward(
+        env: Env,
+        player: Address,
+    ) -> i128 {
+        let reward = sustainability_metrics::claim_sustainability_reward(&env, &player)
+            .unwrap();
+        let mut details_bytes = [0u8; 128];
+        details_bytes[0..8].copy_from_slice(&(reward as i64).to_be_bytes());
+        let details = BytesN::from_array(&env, &details_bytes);
+        let _ = audit_logger::log_audit_event(&env, Some(&player), symbol_short!("er"), details);
+        reward
+    }
+
+    pub fn get_footprint(env: Env, player: Address) -> FootprintRecord {
+        sustainability_metrics::get_footprint(&env, &player)
+    }
+
+    // ─── Cosmic Anomaly Classification Engine (Issue #70) ────────────────
+
+    pub fn classify_anomaly(
+        env: Env,
+        anomaly_id: u64,
+        features: Vec<u32>,
+    ) -> ClassificationRecord {
+        anomaly_classifier::classify_anomaly(&env, anomaly_id, features)
+            .unwrap()
+    }
+
+    pub fn refine_classification(
+        env: Env,
+        anomaly_id: u64,
+        new_data: Vec<u32>,
+    ) -> ClassificationRecord {
+        anomaly_classifier::refine_classification(&env, anomaly_id, new_data)
+            .unwrap()
+    }
+
+    pub fn classify_batch(
+        env: Env,
+        items: Vec<(u64, Vec<u32>)>,
+    ) -> Vec<ClassificationRecord> {
+        anomaly_classifier::classify_batch(&env, items)
+    }
+
+    pub fn get_classification(env: Env, anomaly_id: u64) -> Option<ClassificationRecord> {
+        anomaly_classifier::get_classification(&env, anomaly_id)
+    }
+
+    // ─── Shared Reusability Library (Issue #67) ──────────────────────────
+
+    pub fn validate_address(env: Env, auth: Address) -> Result<(), SharedError> {
+        shared_lib::validate_address(&env, auth)
+    }
+
+    pub fn calculate_yield(env: Env, base: i128, multiplier: u32) -> Result<i128, SharedError> {
+        shared_lib::calculate_yield(base, multiplier)
+    }
+
+    // ─── Storage Optimization & Re-Entrancy Guards (Issue #10) ────────────
+
+    /// Initialize the bump storage configuration. Admin-only.
+    pub fn initialize_bump_config(env: Env, admin: Address) {
+        storage_optim::initialize_bump_config(&env, &admin)
+    }
+
+    /// Store data with optimized persistent bump TTL.
+    pub fn store_with_bump(
+        env: Env,
+        key: Symbol,
+        value: BytesN<64>,
+    ) -> Result<OptimResult, StorageError> {
+        storage_optim::store_with_bump(&env, key, value)
+    }
+
+    /// Retrieve an optimized storage entry.
+    pub fn get_optimized_entry(
+        env: Env,
+        key: Symbol,
+    ) -> Result<OptimizedEntry, StorageError> {
+        storage_optim::get_optimized_entry(&env, key)
+    }
+
+    /// Batch-store multiple entries with a single re-entrancy guard.
+    pub fn batch_store_with_bump(
+        env: Env,
+        keys: Vec<Symbol>,
+        values: Vec<BytesN<64>>,
+    ) -> Result<Vec<OptimResult>, StorageError> {
+        storage_optim::batch_store_with_bump(&env, keys, values)
+    }
+
+    /// Store composite ship-nebula data in a single slot.
+    pub fn store_ship_nebula(
+        env: Env,
+        ship_id: u64,
+        nebula_id: u64,
+        scan_count: u32,
+        resource_cache: u64,
+    ) -> Result<(), StorageError> {
+        storage_optim::store_ship_nebula(&env, ship_id, nebula_id, scan_count, resource_cache)
+    }
+
+    /// Retrieve composite ship-nebula data.
+    pub fn get_ship_nebula(
+        env: Env,
+        ship_id: u64,
+        nebula_id: u64,
+    ) -> Result<ShipNebulaData, StorageError> {
+        storage_optim::get_ship_nebula(&env, ship_id, nebula_id)
+    }
+
+    /// Update bump TTL configuration. Admin-only.
+    pub fn update_bump_config(
+        env: Env,
+        admin: Address,
+        default_ttl: u32,
+        max_ttl: u32,
+    ) -> Result<(), StorageError> {
+        storage_optim::update_bump_config(&env, &admin, default_ttl, max_ttl)
+    }
+
+    /// Set the proxy upgrade target address. Admin-only.
+    pub fn set_upgrade_target(
+        env: Env,
+        admin: Address,
+        target: Address,
+    ) -> Result<(), StorageError> {
+        storage_optim::set_upgrade_target(&env, &admin, target)
+    }
+
+    /// Get the current upgrade target if set.
+    pub fn get_upgrade_target(env: Env) -> Option<Address> {
+        storage_optim::get_upgrade_target(&env)
+    }
+
+    /// Reset the burst-read counter for a new invocation.
+    pub fn reset_burst_counter(env: Env) {
+        storage_optim::reset_burst_counter(&env)
+    }
+
+    // ─── On-Chain Game State Snapshots (Issue #58) ───────────────────────
+
+    /// Take a snapshot of the current ship and resource state.
+    pub fn take_snapshot(
+        env: Env,
+        caller: Address,
+        ship_id: u64,
+    ) -> Result<StateSnapshot, SnapshotError> {
+        state_snapshot::take_snapshot(&env, &caller, ship_id)
+    }
+
+    /// Restore ship state from a previously taken snapshot.
+    pub fn restore_from_snapshot(
+        env: Env,
+        caller: Address,
+        snapshot_id: u64,
+    ) -> Result<RestoreResult, SnapshotError> {
+        state_snapshot::restore_from_snapshot(&env, &caller, snapshot_id)
+    }
+
+    /// Get a snapshot by ID.
+    pub fn get_snapshot(
+        env: Env,
+        snapshot_id: u64,
+    ) -> Result<StateSnapshot, SnapshotError> {
+        state_snapshot::get_snapshot(&env, snapshot_id)
+    }
+
+    /// Get all snapshot IDs for a ship.
+    pub fn get_ship_snapshots(env: Env, ship_id: u64) -> Vec<u64> {
+        state_snapshot::get_ship_snapshots(&env, ship_id)
+    }
+
+    /// Trigger an automatic daily snapshot if the interval has elapsed.
+    pub fn auto_snapshot(
+        env: Env,
+        caller: Address,
+        ship_id: u64,
+    ) -> Result<StateSnapshot, SnapshotError> {
+        state_snapshot::auto_snapshot(&env, &caller, ship_id)
+    }
+
+    /// Reset snapshot session counter for a ship.
+    pub fn reset_session_count(env: Env, ship_id: u64) {
+        state_snapshot::reset_session_count(&env, ship_id)
+
+    }
+
+    // ─── Prize Distributor (Issue #62) ───────────────────────────────────
+
+    /// Initialize the weekly prize distributor. One-time setup.
+    pub fn initialize_prize_distributor(env: Env, admin: Address) {
+        prize_distributor::initialize_prize_distributor(&env, &admin)
+    }
+
+    /// Add funds to the prize pool (sponsor-funded pools supported).
+    pub fn fund_prize_pool(env: Env, funder: Address, amount: i128) -> Result<i128, PrizeError> {
+        prize_distributor::fund_prize_pool(&env, &funder, amount)
+    }
+
+    /// Admin: record the current leaderboard snapshot for payout.
+    pub fn submit_leaderboard_snapshot(
+        env: Env,
+        admin: Address,
+        winners: Vec<Address>,
+    ) -> Result<u32, PrizeError> {
+        prize_distributor::submit_leaderboard_snapshot(&env, &admin, &winners)
+    }
+
+    /// Distribute weekly prizes to the top N positions (max 50 per tx).
+    pub fn distribute_weekly_prizes(
+        env: Env,
+        caller: Address,
+        top_n: u32,
+    ) -> Result<Vec<PrizeRecord>, PrizeError> {
+        prize_distributor::distribute_weekly_prizes(&env, &caller, top_n)
+    }
+
+    /// Return current prize pool balance.
+    pub fn get_prize_pool(env: Env) -> i128 {
+        prize_distributor::get_prize_pool(&env)
+    }
+
+    /// Return total prizes distributed all-time.
+    pub fn get_total_distributed(env: Env) -> i128 {
+        prize_distributor::get_total_distributed(&env)
+    }
+
+    // ─── Portal Registry (Issue #71) ─────────────────────────────────────
+
+    /// Initialize the inter-nebula portal registry.
+    pub fn initialize_portal_registry(env: Env, admin: Address) {
+        portal_registry::initialize_portal_registry(&env, &admin)
+    }
+
+    /// Register a new portal between two nebulae.
+    pub fn register_portal(
+        env: Env,
+        owner: Address,
+        source_nebula: u64,
+        target_nebula: u64,
+    ) -> Result<u64, PortalError> {
+        portal_registry::register_portal(&env, &owner, source_nebula, target_nebula)
+    }
+
+    /// Query stability percentage and travel cost for a portal.
+    pub fn query_portal_status(env: Env, portal_id: u64) -> Result<(u32, i128), PortalError> {
+        portal_registry::query_portal_status(&env, portal_id)
+    }
+
+    /// Refresh a portal's stability back to 100%.
+    pub fn refresh_portal(env: Env, owner: Address, portal_id: u64) -> Result<(), PortalError> {
+        portal_registry::refresh_portal(&env, &owner, portal_id)
+    }
+
+    /// Attempt travel through a portal.
+    pub fn travel_through_portal(env: Env, portal_id: u64) -> Result<i128, PortalError> {
+        portal_registry::travel_through_portal(&env, portal_id)
+    }
+
+    // ─── Constellation Mapper (Issue #72) ────────────────────────────────
+
+    /// Record a new star constellation pattern on-chain.
+    pub fn record_constellation(
+        env: Env,
+        recorder: Address,
+        stars: Vec<BytesN<32>>,
+    ) -> Result<u64, ConstellationError> {
+        constellation_mapper::record_constellation(&env, &recorder, &stars)
+    }
+
+    /// Find the best matching known constellation for an observed pattern.
+    pub fn match_constellation(
+        env: Env,
+        observed: Vec<BytesN<32>>,
+    ) -> Result<MatchResult, ConstellationError> {
+        constellation_mapper::match_constellation(&env, &observed)
+    }
+
+    /// Return total recorded constellations.
+    pub fn get_constellation_count(env: Env) -> u64 {
+        constellation_mapper::get_constellation_count(&env)
+    }
+
+    // ─── Quantum Entanglement Comms (Issue #73) ───────────────────────────
+
+    /// Establish an entanglement pair between two ships.
+    pub fn create_entanglement_pair(
+        env: Env,
+        owner_a: Address,
+        ship_a: u64,
+        owner_b: Address,
+        ship_b: u64,
+    ) -> Result<u64, EntanglementError> {
+        entanglement_comms::create_entanglement_pair(&env, &owner_a, ship_a, &owner_b, ship_b)
+    }
+
+    /// Send a single encrypted message over an active pair.
+    pub fn send_entangled_message(
+        env: Env,
+        caller: Address,
+        pair_id: u64,
+        message: BytesN<64>,
+    ) -> Result<u64, EntanglementError> {
+        entanglement_comms::send_entangled_message(&env, &caller, pair_id, &message)
+    }
+
+    /// Send up to 20 messages in one transaction.
+    pub fn send_entangled_message_batch(
+        env: Env,
+        caller: Address,
+        pair_id: u64,
+        messages: Vec<BytesN<64>>,
+    ) -> Result<u64, EntanglementError> {
+        entanglement_comms::send_entangled_message_batch(&env, &caller, pair_id, &messages)
+    }
+
+    /// Dissolve an entanglement pair.
+    pub fn dissolve_pair(
+        env: Env,
+        caller: Address,
+        pair_id: u64,
+    ) -> Result<(), EntanglementError> {
+        entanglement_comms::dissolve_pair(&env, &caller, pair_id)
+    }
+
+    /// Return total messages sent over a pair.
+    pub fn get_message_count(env: Env, pair_id: u64) -> u64 {
+        entanglement_comms::get_message_count(&env, pair_id)
     }
 }
