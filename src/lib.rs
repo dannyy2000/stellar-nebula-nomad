@@ -50,6 +50,7 @@ mod wormhole_traveler;
 mod alliance_manager;
 mod market_oracle;
 mod audio_seed_generator;
+mod navigation_planner;
 
 pub use nebula_explorer::{
     calculate_rarity_tier, compute_layout_hash, generate_nebula_layout, CellType, NebulaCell,
@@ -183,6 +184,11 @@ pub use audio_seed_generator::{
     initialize_presets, generate_music_seed, get_instrument_layer, get_all_layers,
     get_nebula_seed, get_preset, MusicSeed, InstrumentParams, AudioError,
     INSTRUMENT_PRESETS, MAX_LAYERS_PER_NEBULA,
+};
+pub use navigation_planner::{
+    initialize_nav_graph, add_nebula_connection, add_nebula_connections_batch,
+    calculate_optimal_route, validate_route_safety, get_neighbors, get_connection,
+    NavError, NavPath, RouteEdge, NavConfig, MAX_ROUTE_HOPS, MAX_CONNECTIONS_PER_BATCH,
 };
 
 #[contract]
@@ -1505,5 +1511,58 @@ impl NebulaNomadContract {
     /// Get instrument preset by ID.
     pub fn get_preset(env: Env, preset_id: u32) -> Result<InstrumentParams, AudioError> {
         audio_seed_generator::get_preset(&env, preset_id)
+    }
+
+    // ─── Nebula Navigation Route Planner (Issue #69) ──────────────────────────
+
+    /// Initialise the nebula navigation graph with an admin address.
+    pub fn initialize_nav_graph(env: Env, admin: Address) -> Result<(), NavError> {
+        navigation_planner::initialize_nav_graph(&env, &admin)
+    }
+
+    /// Register a directed edge (connection) between two nebulae.
+    pub fn add_nebula_connection(
+        env: Env,
+        admin: Address,
+        from: u64,
+        to: u64,
+        fuel_cost: u32,
+        hazard_level: u32,
+    ) -> Result<(), NavError> {
+        navigation_planner::add_nebula_connection(&env, &admin, from, to, fuel_cost, hazard_level)
+    }
+
+    /// Add up to MAX_CONNECTIONS_PER_BATCH edges in a single transaction.
+    pub fn add_nebula_connections_batch(
+        env: Env,
+        admin: Address,
+        edges: Vec<RouteEdge>,
+    ) -> Result<u32, NavError> {
+        navigation_planner::add_nebula_connections_batch(&env, &admin, edges)
+    }
+
+    /// Dijkstra shortest-fuel-cost route between two nebulae (≤ 12 hops).
+    /// Emits RouteCalculated event on success.
+    pub fn calculate_optimal_route(
+        env: Env,
+        start: u64,
+        dest: u64,
+    ) -> Result<NavPath, NavError> {
+        navigation_planner::calculate_optimal_route(&env, start, dest)
+    }
+
+    /// Validate a caller-supplied route Vec and return its aggregate risk score.
+    pub fn validate_route_safety(env: Env, route: Vec<u64>) -> Result<u32, NavError> {
+        navigation_planner::validate_route_safety(&env, route)
+    }
+
+    /// Return the adjacency list (outgoing edges) for a nebula.
+    pub fn get_neighbors(env: Env, nebula_id: u64) -> Vec<RouteEdge> {
+        navigation_planner::get_neighbors(&env, nebula_id)
+    }
+
+    /// Return the single directed edge from `from` to `to`, if it exists.
+    pub fn get_nav_connection(env: Env, from: u64, to: u64) -> Option<RouteEdge> {
+        navigation_planner::get_connection(&env, from, to)
     }
 }
