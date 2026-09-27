@@ -83,6 +83,8 @@ pub enum TradingError {
     OrderCapReached = 4,
     InvalidPrice = 5,
     InvalidQuantity = 6,
+    /// A guarded section was re-entered (Issue #472).
+    Reentrancy = 7,
 }
 
 impl crate::error_standard::StandardContractError for TradingError {
@@ -95,6 +97,7 @@ impl crate::error_standard::StandardContractError for TradingError {
             Self::OrderNotFound => (ErrorKind::NotFound, false),
             Self::NotOrderOwner => (ErrorKind::Authorization, false),
             Self::OrderCapReached => (ErrorKind::ResourceLimit, false),
+            Self::Reentrancy => (ErrorKind::Conflict, false),
         };
         crate::error_standard::ErrorDescriptor {
             module: "trading",
@@ -102,6 +105,12 @@ impl crate::error_standard::StandardContractError for TradingError {
             kind,
             retryable,
         }
+    }
+}
+
+impl From<ReentrancyError> for TradingError {
+    fn from(_: ReentrancyError) -> Self {
+        TradingError::Reentrancy
     }
 }
 
@@ -124,94 +133,106 @@ fn next_order_id(env: &Env) -> u64 {
 /// Place a limit order (buy or sell). Emits `OrderPlaced`.
 ///
 /// Returns the new order ID.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn place_limit_order(
     env: &Env,
     trader: &Address,
     mut order: LimitOrder,
 ) -> Result<u64, TradingError> {
-    trader.require_auth();
+    with_guard(env, || {
+        trader.require_auth();
 
-    if order.limit_price <= 0 {
-        return Err(TradingError::InvalidPrice);
-    }
-    if order.quantity <= 0 {
-        return Err(TradingError::InvalidQuantity);
-    }
+        if order.limit_price <= 0 {
+            return Err(TradingError::InvalidPrice);
+        }
+        if order.quantity <= 0 {
+            return Err(TradingError::InvalidQuantity);
+        }
 
-    // Enforce per-trader open order cap
-    let mut ids: Vec<u64> = env
-        .storage()
-        .persistent()
-        .get(&TradingKey::TraderOrders(trader.clone()))
-        .unwrap_or_else(|| Vec::new(env));
+        // Enforce per-trader open order cap
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&TradingKey::TraderOrders(trader.clone()))
+            .unwrap_or_else(|| Vec::new(env));
 
-    if ids.len() >= MAX_ORDERS_PER_TRADER {
-        return Err(TradingError::OrderCapReached);
-    }
+        if ids.len() >= MAX_ORDERS_PER_TRADER {
+            return Err(TradingError::OrderCapReached);
+        }
 
-    let id = next_order_id(env);
-    order.id = id;
-    order.trader = trader.clone();
-    order.placed_at = env.ledger().timestamp();
+        let id = next_order_id(env);
+        order.id = id;
+        order.trader = trader.clone();
+        order.placed_at = env.ledger().timestamp();
 
-    env.storage()
-        .persistent()
-        .set(&TradingKey::Order(id), &order);
+        env.storage()
+            .persistent()
+            .set(&TradingKey::Order(id), &order);
 
-    ids.push_back(id);
-    env.storage()
-        .persistent()
-        .set(&TradingKey::TraderOrders(trader.clone()), &ids);
+        ids.push_back(id);
+        env.storage()
+            .persistent()
+            .set(&TradingKey::TraderOrders(trader.clone()), &ids);
 
-    env.events().publish(
-        (symbol_short!("trade"), symbol_short!("placed")),
-        (trader.clone(), id, order.limit_price, order.quantity),
-    );
+        env.events().publish(
+            (symbol_short!("trade"), symbol_short!("placed")),
+            (trader.clone(), id, order.limit_price, order.quantity),
+        );
 
-    Ok(id)
+        Ok(id)
+    })
 }
 
 /// Cancel an open limit order (owner only). Emits `OrderCancelled`.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn cancel_limit_order(env: &Env, trader: &Address, order_id: u64) -> Result<(), TradingError> {
-    trader.require_auth();
+    with_guard(env, || {
+        trader.require_auth();
 
-    let order: LimitOrder = env
-        .storage()
-        .persistent()
-        .get(&TradingKey::Order(order_id))
-        .ok_or(TradingError::OrderNotFound)?;
+        let order: LimitOrder = env
+            .storage()
+            .persistent()
+            .get(&TradingKey::Order(order_id))
+            .ok_or(TradingError::OrderNotFound)?;
 
-    if &order.trader != trader {
-        return Err(TradingError::NotOrderOwner);
-    }
-
-    env.storage()
-        .persistent()
-        .remove(&TradingKey::Order(order_id));
-
-    // Remove from trader's order list
-    let mut ids: Vec<u64> = env
-        .storage()
-        .persistent()
-        .get(&TradingKey::TraderOrders(trader.clone()))
-        .unwrap_or_else(|| Vec::new(env));
-    let mut new_ids: Vec<u64> = Vec::new(env);
-    for i in 0..ids.len() {
-        let oid = ids.get(i).unwrap();
-        if oid != order_id {
-            new_ids.push_back(oid);
+        if &order.trader != trader {
+            return Err(TradingError::NotOrderOwner);
         }
-    }
-    env.storage()
-        .persistent()
-        .set(&TradingKey::TraderOrders(trader.clone()), &new_ids);
 
-    env.events().publish(
-        (symbol_short!("trade"), symbol_short!("cancel")),
-        (trader.clone(), order_id),
-    );
+        env.storage()
+            .persistent()
+            .remove(&TradingKey::Order(order_id));
 
-    Ok(())
+        // Remove from trader's order list
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&TradingKey::TraderOrders(trader.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        let mut new_ids: Vec<u64> = Vec::new(env);
+        for i in 0..ids.len() {
+            let oid = ids.get(i).unwrap();
+            if oid != order_id {
+                new_ids.push_back(oid);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&TradingKey::TraderOrders(trader.clone()), &new_ids);
+
+        env.events().publish(
+            (symbol_short!("trade"), symbol_short!("cancel")),
+            (trader.clone(), order_id),
+        );
+
+        Ok(())
+    })
 }
 
 /// Get a limit order by ID.
@@ -238,36 +259,42 @@ pub fn get_trader_orders(env: &Env, trader: &Address) -> Vec<LimitOrder> {
 }
 
 /// Record a completed trade in the history ring buffer. Emits `TradeExecuted`.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn record_trade(env: &Env, caller: &Address, trade: TradeRecord) -> Result<(), TradingError> {
-    caller.require_auth();
+    with_guard(env, || {
+        caller.require_auth();
 
-    let mut history: Vec<TradeRecord> = env
-        .storage()
-        .persistent()
-        .get(&TradingKey::History)
-        .unwrap_or_else(|| Vec::new(env));
+        let mut history: Vec<TradeRecord> = env
+            .storage()
+            .persistent()
+            .get(&TradingKey::History)
+            .unwrap_or_else(|| Vec::new(env));
 
-    // Keep only the most recent MAX_HISTORY records (trim oldest)
-    if history.len() >= MAX_HISTORY {
-        let mut trimmed: Vec<TradeRecord> = Vec::new(env);
-        let start = history.len() - MAX_HISTORY + 1;
-        for i in start..history.len() {
-            trimmed.push_back(history.get(i).unwrap());
+        // Keep only the most recent MAX_HISTORY records (trim oldest)
+        if history.len() >= MAX_HISTORY {
+            let mut trimmed: Vec<TradeRecord> = Vec::new(env);
+            let start = history.len() - MAX_HISTORY + 1;
+            for i in start..history.len() {
+                trimmed.push_back(history.get(i).unwrap());
+            }
+            history = trimmed;
         }
-        history = trimmed;
-    }
 
-    history.push_back(trade.clone());
-    env.storage()
-        .persistent()
-        .set(&TradingKey::History, &history);
+        history.push_back(trade.clone());
+        env.storage()
+            .persistent()
+            .set(&TradingKey::History, &history);
 
-    env.events().publish(
-        (symbol_short!("trade"), symbol_short!("exec")),
-        (caller.clone(), trade.order_id, trade.price, trade.quantity),
-    );
+        env.events().publish(
+            (symbol_short!("trade"), symbol_short!("exec")),
+            (caller.clone(), trade.order_id, trade.price, trade.quantity),
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Return the full trading history (up to `MAX_HISTORY` records).
@@ -434,71 +461,81 @@ fn calculate_lp_mint(
 
 /// Create a new liquidity pool for a resource pair.
 /// Returns the pool_id.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn create_pool(
     env: &Env,
     creator: &Address,
     resource_a: Symbol,
     resource_b: Symbol,
 ) -> Result<u64, AmmError> {
-    creator.require_auth();
+    with_guard(env, || {
+        creator.require_auth();
 
-    if resource_a == resource_b {
-        return Err(AmmError::InvalidAmount);
-    }
+        if resource_a == resource_b {
+            return Err(AmmError::InvalidAmount);
+        }
 
-    // Check if pool already exists for this pair (both orderings)
-    let pools: Vec<u64> = env
-        .storage()
-        .instance()
-        .get(&AmmKey::PoolList)
-        .unwrap_or_else(|| Vec::new(env));
+        // Check if pool already exists for this pair (both orderings)
+        let pools: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&AmmKey::PoolList)
+            .unwrap_or_else(|| Vec::new(env));
 
-    for i in 0..pools.len() {
-        if let Some(pid) = pools.get(i) {
-            if let Some(pool) = env
-                .storage()
-                .persistent()
-                .get::<_, LiquidityPool>(&AmmKey::Pool(pid))
-            {
-                if (pool.resource_a == resource_a && pool.resource_b == resource_b)
-                    || (pool.resource_a == resource_b && pool.resource_b == resource_a)
+        for i in 0..pools.len() {
+            if let Some(pid) = pools.get(i) {
+                if let Some(pool) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, LiquidityPool>(&AmmKey::Pool(pid))
                 {
-                    return Err(AmmError::PoolAlreadyExists);
+                    if (pool.resource_a == resource_a && pool.resource_b == resource_b)
+                        || (pool.resource_a == resource_b && pool.resource_b == resource_a)
+                    {
+                        return Err(AmmError::PoolAlreadyExists);
+                    }
                 }
             }
         }
-    }
 
-    let pool_id = next_pool_id(env);
-    let pool = LiquidityPool {
-        pool_id,
-        resource_a: resource_a.clone(),
-        resource_b: resource_b.clone(),
-        reserve_a: 0,
-        reserve_b: 0,
-        lp_total_supply: 0,
-        fee_bps: SWAP_FEE_BPS,
-        created_at: env.ledger().timestamp(),
-    };
+        let pool_id = next_pool_id(env);
+        let pool = LiquidityPool {
+            pool_id,
+            resource_a: resource_a.clone(),
+            resource_b: resource_b.clone(),
+            reserve_a: 0,
+            reserve_b: 0,
+            lp_total_supply: 0,
+            fee_bps: SWAP_FEE_BPS,
+            created_at: env.ledger().timestamp(),
+        };
 
-    env.storage()
-        .persistent()
-        .set(&AmmKey::Pool(pool_id), &pool);
+        env.storage()
+            .persistent()
+            .set(&AmmKey::Pool(pool_id), &pool);
 
-    let mut pool_list = pools;
-    pool_list.push_back(pool_id);
-    env.storage().instance().set(&AmmKey::PoolList, &pool_list);
+        let mut pool_list = pools;
+        pool_list.push_back(pool_id);
+        env.storage().instance().set(&AmmKey::PoolList, &pool_list);
 
-    env.events().publish(
-        (symbol_short!("amm"), symbol_short!("pool_c")),
-        (pool_id, resource_a, resource_b),
-    );
+        env.events().publish(
+            (symbol_short!("amm"), symbol_short!("pool_c")),
+            (pool_id, resource_a, resource_b),
+        );
 
-    Ok(pool_id)
+        Ok(pool_id)
+    })
 }
 
 /// Add liquidity to a pool. Provider receives LP tokens proportional to their share.
 /// Returns (lp_tokens_minted, pool after state).
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn add_liquidity(
     env: &Env,
     provider: &Address,
@@ -506,132 +543,140 @@ pub fn add_liquidity(
     amount_a: i128,
     amount_b: i128,
 ) -> Result<(i128, LiquidityPool), AmmError> {
-    provider.require_auth();
+    with_guard(env, || {
+        provider.require_auth();
 
-    if amount_a <= 0 || amount_b <= 0 {
-        return Err(AmmError::InvalidAmount);
-    }
+        if amount_a <= 0 || amount_b <= 0 {
+            return Err(AmmError::InvalidAmount);
+        }
 
-    let key = AmmKey::Pool(pool_id);
-    let mut pool: LiquidityPool = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .ok_or(AmmError::PoolNotFound)?;
+        let key = AmmKey::Pool(pool_id);
+        let mut pool: LiquidityPool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(AmmError::PoolNotFound)?;
 
-    let lp_mint = calculate_lp_mint(
-        amount_a,
-        amount_b,
-        pool.reserve_a,
-        pool.reserve_b,
-        pool.lp_total_supply,
-    );
+        let lp_mint = calculate_lp_mint(
+            amount_a,
+            amount_b,
+            pool.reserve_a,
+            pool.reserve_b,
+            pool.lp_total_supply,
+        );
 
-    if lp_mint <= 0 {
-        return Err(AmmError::ZeroLiquidity);
-    }
+        if lp_mint <= 0 {
+            return Err(AmmError::ZeroLiquidity);
+        }
 
-    // Update reserves
-    pool.reserve_a = pool
-        .reserve_a
-        .checked_add(amount_a)
-        .ok_or(AmmError::InvalidAmount)?;
-    pool.reserve_b = pool
-        .reserve_b
-        .checked_add(amount_b)
-        .ok_or(AmmError::InvalidAmount)?;
-    pool.lp_total_supply = pool
-        .lp_total_supply
-        .checked_add(lp_mint)
-        .ok_or(AmmError::InvalidAmount)?;
+        // Update reserves
+        pool.reserve_a = pool
+            .reserve_a
+            .checked_add(amount_a)
+            .ok_or(AmmError::InvalidAmount)?;
+        pool.reserve_b = pool
+            .reserve_b
+            .checked_add(amount_b)
+            .ok_or(AmmError::InvalidAmount)?;
+        pool.lp_total_supply = pool
+            .lp_total_supply
+            .checked_add(lp_mint)
+            .ok_or(AmmError::InvalidAmount)?;
 
-    env.storage().persistent().set(&key, &pool);
+        env.storage().persistent().set(&key, &pool);
 
-    // Mint LP tokens to provider
-    let lp_key = AmmKey::LpBalance(pool_id, provider.clone());
-    let current_balance: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
-    env.storage()
-        .persistent()
-        .set(&lp_key, &(current_balance + lp_mint));
+        // Mint LP tokens to provider
+        let lp_key = AmmKey::LpBalance(pool_id, provider.clone());
+        let current_balance: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&lp_key, &(current_balance + lp_mint));
 
-    // Update total supply key
-    env.storage()
-        .persistent()
-        .set(&AmmKey::LpTotalSupply(pool_id), &pool.lp_total_supply);
+        // Update total supply key
+        env.storage()
+            .persistent()
+            .set(&AmmKey::LpTotalSupply(pool_id), &pool.lp_total_supply);
 
-    env.events().publish(
-        (symbol_short!("amm"), symbol_short!("liq_add")),
-        (pool_id, provider.clone(), amount_a, amount_b, lp_mint),
-    );
+        env.events().publish(
+            (symbol_short!("amm"), symbol_short!("liq_add")),
+            (pool_id, provider.clone(), amount_a, amount_b, lp_mint),
+        );
 
-    Ok((lp_mint, pool))
+        Ok((lp_mint, pool))
+    })
 }
 
 /// Remove liquidity by burning LP tokens. Provider receives proportional reserves.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn remove_liquidity(
     env: &Env,
     provider: &Address,
     pool_id: u64,
     lp_amount: i128,
 ) -> Result<(i128, i128), AmmError> {
-    provider.require_auth();
+    with_guard(env, || {
+        provider.require_auth();
 
-    if lp_amount <= 0 {
-        return Err(AmmError::InvalidAmount);
-    }
+        if lp_amount <= 0 {
+            return Err(AmmError::InvalidAmount);
+        }
 
-    let key = AmmKey::Pool(pool_id);
-    let mut pool: LiquidityPool = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .ok_or(AmmError::PoolNotFound)?;
+        let key = AmmKey::Pool(pool_id);
+        let mut pool: LiquidityPool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(AmmError::PoolNotFound)?;
 
-    let lp_key = AmmKey::LpBalance(pool_id, provider.clone());
-    let current_balance: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
+        let lp_key = AmmKey::LpBalance(pool_id, provider.clone());
+        let current_balance: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
 
-    if current_balance < lp_amount {
-        return Err(AmmError::InsufficientLpTokens);
-    }
+        if current_balance < lp_amount {
+            return Err(AmmError::InsufficientLpTokens);
+        }
 
-    if pool.lp_total_supply <= 0 {
-        return Err(AmmError::ZeroLiquidity);
-    }
+        if pool.lp_total_supply <= 0 {
+            return Err(AmmError::ZeroLiquidity);
+        }
 
-    // Calculate share of reserves
-    let share_a = lp_amount * pool.reserve_a / pool.lp_total_supply;
-    let share_b = lp_amount * pool.reserve_b / pool.lp_total_supply;
+        // Calculate share of reserves
+        let share_a = lp_amount * pool.reserve_a / pool.lp_total_supply;
+        let share_b = lp_amount * pool.reserve_b / pool.lp_total_supply;
 
-    // Update reserves
-    pool.reserve_a = pool
-        .reserve_a
-        .checked_sub(share_a)
-        .ok_or(AmmError::InsufficientLiquidity)?;
-    pool.reserve_b = pool
-        .reserve_b
-        .checked_sub(share_b)
-        .ok_or(AmmError::InsufficientLiquidity)?;
-    pool.lp_total_supply = pool
-        .lp_total_supply
-        .checked_sub(lp_amount)
-        .ok_or(AmmError::InvalidAmount)?;
+        // Update reserves
+        pool.reserve_a = pool
+            .reserve_a
+            .checked_sub(share_a)
+            .ok_or(AmmError::InsufficientLiquidity)?;
+        pool.reserve_b = pool
+            .reserve_b
+            .checked_sub(share_b)
+            .ok_or(AmmError::InsufficientLiquidity)?;
+        pool.lp_total_supply = pool
+            .lp_total_supply
+            .checked_sub(lp_amount)
+            .ok_or(AmmError::InvalidAmount)?;
 
-    env.storage().persistent().set(&key, &pool);
+        env.storage().persistent().set(&key, &pool);
 
-    // Burn LP tokens
-    env.storage()
-        .persistent()
-        .set(&lp_key, &(current_balance - lp_amount));
-    env.storage()
-        .persistent()
-        .set(&AmmKey::LpTotalSupply(pool_id), &pool.lp_total_supply);
+        // Burn LP tokens
+        env.storage()
+            .persistent()
+            .set(&lp_key, &(current_balance - lp_amount));
+        env.storage()
+            .persistent()
+            .set(&AmmKey::LpTotalSupply(pool_id), &pool.lp_total_supply);
 
-    env.events().publish(
-        (symbol_short!("amm"), symbol_short!("liq_rem")),
-        (pool_id, provider.clone(), lp_amount, share_a, share_b),
-    );
+        env.events().publish(
+            (symbol_short!("amm"), symbol_short!("liq_rem")),
+            (pool_id, provider.clone(), lp_amount, share_a, share_b),
+        );
 
-    Ok((share_a, share_b))
+        Ok((share_a, share_b))
+    })
 }
 
 /// Swap an exact input amount for an output. Supports multi-hop routing via `route`.
@@ -650,8 +695,6 @@ pub fn swap_exact_input(
     min_amount_out: i128,
     route: Vec<u64>,
 ) -> Result<i128, AmmError> {
-    trader.require_auth();
-
     if amount_in <= 0 {
         return Err(AmmError::InvalidAmount);
     }
@@ -660,6 +703,8 @@ pub fn swap_exact_input(
     }
 
     with_guard(env, || {
+        trader.require_auth();
+
         let mut current_amount = amount_in;
         let resource_in_clone = resource_in.clone();
         let mut current_resource = resource_in;

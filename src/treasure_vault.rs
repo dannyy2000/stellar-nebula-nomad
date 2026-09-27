@@ -1,5 +1,7 @@
 use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Env};
 
+use crate::reentrancy_guard::{with_guard, ReentrancyError};
+
 /// Default minimum lock duration: 7 days in seconds.
 pub const DEFAULT_MIN_LOCK_DURATION: u64 = 604_800;
 
@@ -34,6 +36,8 @@ pub enum VaultError {
     InvalidAmount = 5,
     /// A checked arithmetic operation overflowed (Issue #239).
     ArithmeticOverflow = 6,
+    /// A guarded section was re-entered (Issue #472).
+    Reentrancy = 7,
 }
 
 impl crate::error_standard::StandardContractError for VaultError {
@@ -43,7 +47,7 @@ impl crate::error_standard::StandardContractError for VaultError {
             Self::VaultNotFound => (ErrorKind::NotFound, false),
             Self::NotOwner => (ErrorKind::Authorization, false),
             Self::StillLocked => (ErrorKind::Conflict, true),
-            Self::AlreadyClaimed => (ErrorKind::Conflict, false),
+            Self::AlreadyClaimed | Self::Reentrancy => (ErrorKind::Conflict, false),
             Self::InvalidAmount => (ErrorKind::Validation, false),
             Self::ArithmeticOverflow => (ErrorKind::ResourceLimit, false),
         };
@@ -53,6 +57,12 @@ impl crate::error_standard::StandardContractError for VaultError {
             kind,
             retryable,
         }
+    }
+}
+
+impl From<ReentrancyError> for VaultError {
+    fn from(_: ReentrancyError) -> Self {
+        VaultError::Reentrancy
     }
 }
 
@@ -99,87 +109,99 @@ fn get_min_lock_duration(env: &Env) -> u64 {
 /// The vault locks the specified `amount` until `lock_until`, which is
 /// calculated as the current timestamp plus the minimum lock duration.
 /// A bonus multiplier is applied at claim time.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn deposit_treasure(
     env: &Env,
     owner: &Address,
     ship_id: u64,
     amount: u64,
 ) -> Result<TreasureVault, VaultError> {
-    ensure_auth!(owner);
+    with_guard(env, || {
+        ensure_auth!(owner);
 
-    if amount == 0 {
-        return Err(VaultError::InvalidAmount);
-    }
+        if amount == 0 {
+            return Err(VaultError::InvalidAmount);
+        }
 
-    let min_lock = get_min_lock_duration(env);
-    let lock_until = env
-        .ledger()
-        .timestamp()
-        .checked_add(min_lock)
-        .ok_or(VaultError::ArithmeticOverflow)?;
-    let vault_id = next_vault_id(env)?;
+        let min_lock = get_min_lock_duration(env);
+        let lock_until = env
+            .ledger()
+            .timestamp()
+            .checked_add(min_lock)
+            .ok_or(VaultError::ArithmeticOverflow)?;
+        let vault_id = next_vault_id(env)?;
 
-    let vault = TreasureVault {
-        vault_id,
-        owner: owner.clone(),
-        ship_id,
-        amount,
-        lock_until,
-        bonus_multiplier: BONUS_BPS,
-        claimed: false,
-    };
+        let vault = TreasureVault {
+            vault_id,
+            owner: owner.clone(),
+            ship_id,
+            amount,
+            lock_until,
+            bonus_multiplier: BONUS_BPS,
+            claimed: false,
+        };
 
-    storage_set!(env, VaultKey::Vault(vault_id), vault);
+        storage_set!(env, VaultKey::Vault(vault_id), vault);
 
-    // Emit VaultDeposited event
-    env.events().publish(
-        (symbol_short!("vault"), symbol_short!("deposit")),
-        (vault_id, owner.clone(), ship_id, amount, lock_until),
-    );
+        // Emit VaultDeposited event
+        env.events().publish(
+            (symbol_short!("vault"), symbol_short!("deposit")),
+            (vault_id, owner.clone(), ship_id, amount, lock_until),
+        );
 
-    Ok(vault)
+        Ok(vault)
+    })
 }
 
 /// Claim a treasure vault after its lock period has expired.
 ///
 /// Returns the original amount plus bonus yield.
 /// The bonus is calculated as: `amount * bonus_multiplier / 10_000`.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn claim_treasure(env: &Env, owner: &Address, vault_id: u64) -> Result<u64, VaultError> {
-    ensure_auth!(owner);
+    with_guard(env, || {
+        ensure_auth!(owner);
 
-    let mut vault: TreasureVault = env
-        .storage()
-        .instance()
-        .get(&VaultKey::Vault(vault_id))
-        .ok_or(VaultError::VaultNotFound)?;
+        let mut vault: TreasureVault = env
+            .storage()
+            .instance()
+            .get(&VaultKey::Vault(vault_id))
+            .ok_or(VaultError::VaultNotFound)?;
 
-    if vault.owner != *owner {
-        return Err(VaultError::NotOwner);
-    }
+        if vault.owner != *owner {
+            return Err(VaultError::NotOwner);
+        }
 
-    if vault.claimed {
-        return Err(VaultError::AlreadyClaimed);
-    }
+        if vault.claimed {
+            return Err(VaultError::AlreadyClaimed);
+        }
 
-    let now = env.ledger().timestamp();
-    if now < vault.lock_until {
-        return Err(VaultError::StillLocked);
-    }
+        let now = env.ledger().timestamp();
+        if now < vault.lock_until {
+            return Err(VaultError::StillLocked);
+        }
 
-    // Calculate bonus yield (checked: Issue #239)
-    let total_payout = calculate_bonus_payout(vault.amount, vault.bonus_multiplier)
-        .ok_or(VaultError::ArithmeticOverflow)?;
+        // Calculate bonus yield (checked: Issue #239)
+        let total_payout = calculate_bonus_payout(vault.amount, vault.bonus_multiplier)
+            .ok_or(VaultError::ArithmeticOverflow)?;
 
-    vault.claimed = true;
-    storage_set!(env, VaultKey::Vault(vault_id), vault);
+        vault.claimed = true;
+        storage_set!(env, VaultKey::Vault(vault_id), vault);
 
-    // Emit VaultClaimed event
-    env.events().publish(
-        (symbol_short!("vault"), symbol_short!("claimed")),
-        (vault_id, owner.clone(), total_payout),
-    );
+        // Emit VaultClaimed event
+        env.events().publish(
+            (symbol_short!("vault"), symbol_short!("claimed")),
+            (vault_id, owner.clone(), total_payout),
+        );
 
-    Ok(total_payout)
+        Ok(total_payout)
+    })
 }
 
 /// Read a vault by ID.

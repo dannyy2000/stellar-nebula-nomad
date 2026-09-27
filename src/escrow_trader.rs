@@ -88,6 +88,9 @@ pub struct EscrowResult {
     pub completed: bool,
 }
 
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn initiate_escrow(
     env: &Env,
     trader_a: Address,
@@ -95,114 +98,121 @@ pub fn initiate_escrow(
     assets_a: Vec<TradeAsset>,
     assets_b: Vec<TradeAsset>,
 ) -> Result<Escrow, EscrowError> {
-    trader_a.require_auth();
+    with_guard(env, || {
+        trader_a.require_auth();
 
-    if assets_a.is_empty() || assets_b.is_empty() {
-        return Err(EscrowError::InvalidAssets);
-    }
+        if assets_a.is_empty() || assets_b.is_empty() {
+            return Err(EscrowError::InvalidAssets);
+        }
 
-    let escrow_count_a = env
-        .storage()
-        .persistent()
-        .get::<EscrowKey, u32>(&EscrowKey::PlayerEscrowCount(trader_a.clone()))
-        .unwrap_or(0);
+        let escrow_count_a = env
+            .storage()
+            .persistent()
+            .get::<EscrowKey, u32>(&EscrowKey::PlayerEscrowCount(trader_a.clone()))
+            .unwrap_or(0);
 
-    if escrow_count_a >= MAX_CONCURRENT_ESCROWS {
-        return Err(EscrowError::MaxEscrowsReached);
-    }
+        if escrow_count_a >= MAX_CONCURRENT_ESCROWS {
+            return Err(EscrowError::MaxEscrowsReached);
+        }
 
-    let escrow_counter = env
-        .storage()
-        .persistent()
-        .get::<EscrowKey, u64>(&EscrowKey::EscrowCounter)
-        .unwrap_or(0)
-        + 1;
+        let escrow_counter = env
+            .storage()
+            .persistent()
+            .get::<EscrowKey, u64>(&EscrowKey::EscrowCounter)
+            .unwrap_or(0)
+            + 1;
 
-    env.storage()
-        .persistent()
-        .set(&EscrowKey::EscrowCounter, &escrow_counter);
+        env.storage()
+            .persistent()
+            .set(&EscrowKey::EscrowCounter, &escrow_counter);
 
-    let current_time = env.ledger().timestamp();
-    let expires_at = current_time + ESCROW_EXPIRY;
+        let current_time = env.ledger().timestamp();
+        let expires_at = current_time + ESCROW_EXPIRY;
 
-    let escrow = Escrow {
-        escrow_id: escrow_counter,
-        trader_a: trader_a.clone(),
-        trader_b: trader_b.clone(),
-        assets_a,
-        assets_b,
-        confirmed_a: true,
-        confirmed_b: false,
-        completed: false,
-        created_at: current_time,
-        expires_at,
-    };
+        let escrow = Escrow {
+            escrow_id: escrow_counter,
+            trader_a: trader_a.clone(),
+            trader_b: trader_b.clone(),
+            assets_a,
+            assets_b,
+            confirmed_a: true,
+            confirmed_b: false,
+            completed: false,
+            created_at: current_time,
+            expires_at,
+        };
 
-    env.storage()
-        .persistent()
-        .set(&EscrowKey::EscrowData(escrow_counter), &escrow);
+        env.storage()
+            .persistent()
+            .set(&EscrowKey::EscrowData(escrow_counter), &escrow);
 
-    env.storage().persistent().set(
-        &EscrowKey::PlayerEscrowCount(trader_a.clone()),
-        &(escrow_count_a + 1),
-    );
+        env.storage().persistent().set(
+            &EscrowKey::PlayerEscrowCount(trader_a.clone()),
+            &(escrow_count_a + 1),
+        );
 
-    env.storage().persistent().set(
-        &EscrowKey::EscrowConfirmation(escrow_counter, trader_a.clone()),
-        &true,
-    );
+        env.storage().persistent().set(
+            &EscrowKey::EscrowConfirmation(escrow_counter, trader_a.clone()),
+            &true,
+        );
 
-    env.events().publish(
-        (symbol_short!("escrow"), symbol_short!("init")),
-        (escrow_counter, trader_a, trader_b),
-    );
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("init")),
+            (escrow_counter, trader_a, trader_b),
+        );
 
-    Ok(escrow)
+        Ok(escrow)
+    })
 }
 
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn confirm_escrow(env: &Env, escrow_id: u64, trader: Address) -> Result<Escrow, EscrowError> {
-    trader.require_auth();
+    with_guard(env, || {
+        trader.require_auth();
 
-    let mut escrow = env
-        .storage()
-        .persistent()
-        .get::<EscrowKey, Escrow>(&EscrowKey::EscrowData(escrow_id))
-        .ok_or(EscrowError::EscrowNotFound)?;
+        let mut escrow = env
+            .storage()
+            .persistent()
+            .get::<EscrowKey, Escrow>(&EscrowKey::EscrowData(escrow_id))
+            .ok_or(EscrowError::EscrowNotFound)?;
 
-    if env.ledger().timestamp() > escrow.expires_at {
-        return Err(EscrowError::TradeExpired);
-    }
+        if env.ledger().timestamp() > escrow.expires_at {
+            return Err(EscrowError::TradeExpired);
+        }
 
-    if trader != escrow.trader_a && trader != escrow.trader_b {
-        return Err(EscrowError::NotParticipant);
-    }
+        if trader != escrow.trader_a && trader != escrow.trader_b {
+            return Err(EscrowError::NotParticipant);
+        }
 
-    let already_confirmed = env
-        .storage()
-        .persistent()
-        .get::<EscrowKey, bool>(&EscrowKey::EscrowConfirmation(escrow_id, trader.clone()))
-        .unwrap_or(false);
+        let already_confirmed = env
+            .storage()
+            .persistent()
+            .get::<EscrowKey, bool>(&EscrowKey::EscrowConfirmation(escrow_id, trader.clone()))
+            .unwrap_or(false);
 
-    if already_confirmed {
-        return Err(EscrowError::AlreadyConfirmed);
-    }
+        if already_confirmed {
+            return Err(EscrowError::AlreadyConfirmed);
+        }
 
-    if trader == escrow.trader_a {
-        escrow.confirmed_a = true;
-    } else {
-        escrow.confirmed_b = true;
-    }
+        if trader == escrow.trader_a {
+            escrow.confirmed_a = true;
+        } else {
+            escrow.confirmed_b = true;
+        }
 
-    env.storage().persistent().set(
-        &EscrowKey::EscrowConfirmation(escrow_id, trader.clone()),
-        &true,
-    );
+        env.storage().persistent().set(
+            &EscrowKey::EscrowConfirmation(escrow_id, trader.clone()),
+            &true,
+        );
 
-    env.storage()
-        .persistent()
-        .set(&EscrowKey::EscrowData(escrow_id), &escrow);
+        env.storage()
+            .persistent()
+            .set(&EscrowKey::EscrowData(escrow_id), &escrow);
 
-    Ok(escrow)
+        Ok(escrow)
+    })
 }
 
 /// # Security
@@ -271,43 +281,48 @@ pub fn complete_escrow(env: &Env, escrow_id: u64) -> Result<EscrowResult, Escrow
     })
 }
 
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn cancel_escrow(env: &Env, escrow_id: u64, trader: Address) -> Result<(), EscrowError> {
-    trader.require_auth();
+    with_guard(env, || {
+        trader.require_auth();
 
-    let escrow = env
-        .storage()
-        .persistent()
-        .get::<EscrowKey, Escrow>(&EscrowKey::EscrowData(escrow_id))
-        .ok_or(EscrowError::EscrowNotFound)?;
+        let escrow = env
+            .storage()
+            .persistent()
+            .get::<EscrowKey, Escrow>(&EscrowKey::EscrowData(escrow_id))
+            .ok_or(EscrowError::EscrowNotFound)?;
 
-    if trader != escrow.trader_a && trader != escrow.trader_b {
-        return Err(EscrowError::NotParticipant);
-    }
+        if trader != escrow.trader_a && trader != escrow.trader_b {
+            return Err(EscrowError::NotParticipant);
+        }
 
-    if escrow.completed {
-        return Err(EscrowError::AlreadyConfirmed);
-    }
+        if escrow.completed {
+            return Err(EscrowError::AlreadyConfirmed);
+        }
 
-    env.storage()
-        .persistent()
-        .remove(&EscrowKey::EscrowData(escrow_id));
+        env.storage()
+            .persistent()
+            .remove(&EscrowKey::EscrowData(escrow_id));
 
-    let count = env
-        .storage()
-        .persistent()
-        .get::<EscrowKey, u32>(&EscrowKey::PlayerEscrowCount(trader.clone()))
-        .unwrap_or(1);
-    env.storage().persistent().set(
-        &EscrowKey::PlayerEscrowCount(trader.clone()),
-        &count.saturating_sub(1),
-    );
+        let count = env
+            .storage()
+            .persistent()
+            .get::<EscrowKey, u32>(&EscrowKey::PlayerEscrowCount(trader.clone()))
+            .unwrap_or(1);
+        env.storage().persistent().set(
+            &EscrowKey::PlayerEscrowCount(trader.clone()),
+            &count.saturating_sub(1),
+        );
 
-    env.events().publish(
-        (symbol_short!("escrow"), symbol_short!("cancel")),
-        (escrow_id, trader),
-    );
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("cancel")),
+            (escrow_id, trader),
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn get_escrow(env: &Env, escrow_id: u64) -> Option<Escrow> {

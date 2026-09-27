@@ -162,36 +162,42 @@ fn calculate_yield_amount(balance: u64, percentage: u32) -> Option<u64> {
 /// # Errors
 /// * [`BondError::SelfBond`] if `initiator` and `partner` are the same address.
 /// * [`BondError::ArithmeticOverflow`] if the bond counter overflows.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn create_bond(
     env: &Env,
     initiator: &Address,
     ship_id: u64,
     partner: &Address,
 ) -> Result<NomadBond, BondError> {
-    initiator.require_auth();
+    with_guard(env, || {
+        initiator.require_auth();
 
-    if initiator == partner {
-        return Err(BondError::SelfBond);
-    }
+        if initiator == partner {
+            return Err(BondError::SelfBond);
+        }
 
-    let bond_id = next_bond_id(env)?;
-    let bond = NomadBond {
-        bond_id,
-        initiator: initiator.clone(),
-        partner: partner.clone(),
-        ship_id,
-        status: BondStatus::Pending,
-        created_at: env.ledger().timestamp(),
-    };
+        let bond_id = next_bond_id(env)?;
+        let bond = NomadBond {
+            bond_id,
+            initiator: initiator.clone(),
+            partner: partner.clone(),
+            ship_id,
+            status: BondStatus::Pending,
+            created_at: env.ledger().timestamp(),
+        };
 
-    env.storage().instance().set(&DataKey::Bond(bond_id), &bond);
+        env.storage().instance().set(&DataKey::Bond(bond_id), &bond);
 
-    env.events().publish(
-        (symbol_short!("bond"), symbol_short!("created")),
-        (bond_id, initiator.clone(), partner.clone()),
-    );
+        env.events().publish(
+            (symbol_short!("bond"), symbol_short!("created")),
+            (bond_id, initiator.clone(), partner.clone()),
+        );
 
-    Ok(bond)
+        Ok(bond)
+    })
 }
 
 /// ── accept_bond ───────────────────────────────────────────────────────────
@@ -202,31 +208,37 @@ pub fn create_bond(
 /// * [`BondError::BondNotFound`] if the bond does not exist.
 /// * [`BondError::NotDesignatedPartner`] if the caller is not the partner.
 /// * [`BondError::BondNotPending`] if the bond is not in `Pending` status.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn accept_bond(env: &Env, partner: &Address, bond_id: u64) -> Result<NomadBond, BondError> {
-    partner.require_auth();
+    with_guard(env, || {
+        partner.require_auth();
 
-    let mut bond: NomadBond = env
-        .storage()
-        .instance()
-        .get(&DataKey::Bond(bond_id))
-        .ok_or(BondError::BondNotFound)?;
+        let mut bond: NomadBond = env
+            .storage()
+            .instance()
+            .get(&DataKey::Bond(bond_id))
+            .ok_or(BondError::BondNotFound)?;
 
-    if bond.partner != *partner {
-        return Err(BondError::NotDesignatedPartner);
-    }
-    if bond.status != BondStatus::Pending {
-        return Err(BondError::BondNotPending);
-    }
+        if bond.partner != *partner {
+            return Err(BondError::NotDesignatedPartner);
+        }
+        if bond.status != BondStatus::Pending {
+            return Err(BondError::BondNotPending);
+        }
 
-    bond.status = BondStatus::Active;
-    env.storage().instance().set(&DataKey::Bond(bond_id), &bond);
+        bond.status = BondStatus::Active;
+        env.storage().instance().set(&DataKey::Bond(bond_id), &bond);
 
-    env.events().publish(
-        (symbol_short!("bond"), symbol_short!("accepted")),
-        (bond_id, partner.clone()),
-    );
+        env.events().publish(
+            (symbol_short!("bond"), symbol_short!("accepted")),
+            (bond_id, partner.clone()),
+        );
 
-    Ok(bond)
+        Ok(bond)
+    })
 }
 
 /// ── delegate_yield ────────────────────────────────────────────────────────
@@ -244,54 +256,60 @@ pub fn accept_bond(env: &Env, partner: &Address, bond_id: u64) -> Result<NomadBo
 /// * [`BondError::BondNotFound`] if the bond does not exist.
 /// * [`BondError::BondNotActive`] if the bond is not `Active`.
 /// * [`BondError::NotBondMember`] if the caller is not part of the bond.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn delegate_yield(
     env: &Env,
     delegator: &Address,
     bond_id: u64,
     percentage: u32,
 ) -> Result<YieldDelegation, BondError> {
-    delegator.require_auth();
+    with_guard(env, || {
+        delegator.require_auth();
 
-    if percentage == 0 || percentage > 100 {
-        return Err(BondError::InvalidPercentage);
-    }
+        if percentage == 0 || percentage > 100 {
+            return Err(BondError::InvalidPercentage);
+        }
 
-    let bond: NomadBond = env
-        .storage()
-        .instance()
-        .get(&DataKey::Bond(bond_id))
-        .ok_or(BondError::BondNotFound)?;
+        let bond: NomadBond = env
+            .storage()
+            .instance()
+            .get(&DataKey::Bond(bond_id))
+            .ok_or(BondError::BondNotFound)?;
 
-    if bond.status != BondStatus::Active {
-        return Err(BondError::BondNotActive);
-    }
+        if bond.status != BondStatus::Active {
+            return Err(BondError::BondNotActive);
+        }
 
-    let beneficiary = if *delegator == bond.initiator {
-        bond.partner.clone()
-    } else if *delegator == bond.partner {
-        bond.initiator.clone()
-    } else {
-        return Err(BondError::NotBondMember);
-    };
+        let beneficiary = if *delegator == bond.initiator {
+            bond.partner.clone()
+        } else if *delegator == bond.partner {
+            bond.initiator.clone()
+        } else {
+            return Err(BondError::NotBondMember);
+        };
 
-    let delegation = YieldDelegation {
-        bond_id,
-        delegator: delegator.clone(),
-        beneficiary: beneficiary.clone(),
-        percentage,
-        total_yielded: 0,
-    };
+        let delegation = YieldDelegation {
+            bond_id,
+            delegator: delegator.clone(),
+            beneficiary: beneficiary.clone(),
+            percentage,
+            total_yielded: 0,
+        };
 
-    env.storage()
-        .instance()
-        .set(&DataKey::YieldDel(bond_id), &delegation);
+        env.storage()
+            .instance()
+            .set(&DataKey::YieldDel(bond_id), &delegation);
 
-    env.events().publish(
-        (symbol_short!("yield"), symbol_short!("delegatd")),
-        (bond_id, delegator.clone(), percentage),
-    );
+        env.events().publish(
+            (symbol_short!("yield"), symbol_short!("delegatd")),
+            (bond_id, delegator.clone(), percentage),
+        );
 
-    Ok(delegation)
+        Ok(delegation)
+    })
 }
 
 /// ── accrue_essence ────────────────────────────────────────────────────────
@@ -302,21 +320,27 @@ pub fn delegate_yield(
 ///
 /// # Errors
 /// * [`BondError::ArithmeticOverflow`] if the new balance overflows `u64`.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn accrue_essence(env: &Env, player: &Address, amount: u64) -> Result<(), BondError> {
-    player.require_auth();
+    with_guard(env, || {
+        player.require_auth();
 
-    let balance: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::Essence(player.clone()))
-        .unwrap_or(0);
-    let new_balance = balance
-        .checked_add(amount)
-        .ok_or(BondError::ArithmeticOverflow)?;
-    env.storage()
-        .instance()
-        .set(&DataKey::Essence(player.clone()), &new_balance);
-    Ok(())
+        let balance: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Essence(player.clone()))
+            .unwrap_or(0);
+        let new_balance = balance
+            .checked_add(amount)
+            .ok_or(BondError::ArithmeticOverflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::Essence(player.clone()), &new_balance);
+        Ok(())
+    })
 }
 
 /// ── claim_yield ───────────────────────────────────────────────────────────
@@ -343,9 +367,9 @@ pub fn accrue_essence(env: &Env, player: &Address, amount: u64) -> Result<(), Bo
 ///   malicious `require_auth` callback (e.g. a custom-account contract)
 ///   cannot re-enter `claim_yield` mid-transfer (Issue #238).
 pub fn claim_yield(env: &Env, claimer: &Address, bond_id: u64) -> Result<u64, BondError> {
-    claimer.require_auth();
-
     with_guard(env, || {
+        claimer.require_auth();
+
         let bond: NomadBond = env
             .storage()
             .instance()
@@ -432,32 +456,38 @@ pub fn claim_yield(env: &Env, claimer: &Address, bond_id: u64) -> Result<u64, Bo
 /// * [`BondError::BondNotFound`] if the bond does not exist.
 /// * [`BondError::AlreadyDissolved`] if the bond is already dissolved.
 /// * [`BondError::NotBondParty`] if the caller is not a bonded party.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn dissolve_bond(env: &Env, caller: &Address, bond_id: u64) -> Result<NomadBond, BondError> {
-    caller.require_auth();
+    with_guard(env, || {
+        caller.require_auth();
 
-    let mut bond: NomadBond = env
-        .storage()
-        .instance()
-        .get(&DataKey::Bond(bond_id))
-        .ok_or(BondError::BondNotFound)?;
+        let mut bond: NomadBond = env
+            .storage()
+            .instance()
+            .get(&DataKey::Bond(bond_id))
+            .ok_or(BondError::BondNotFound)?;
 
-    if bond.status == BondStatus::Dissolved {
-        return Err(BondError::AlreadyDissolved);
-    }
+        if bond.status == BondStatus::Dissolved {
+            return Err(BondError::AlreadyDissolved);
+        }
 
-    if *caller != bond.initiator && *caller != bond.partner {
-        return Err(BondError::NotBondParty);
-    }
+        if *caller != bond.initiator && *caller != bond.partner {
+            return Err(BondError::NotBondParty);
+        }
 
-    bond.status = BondStatus::Dissolved;
-    env.storage().instance().set(&DataKey::Bond(bond_id), &bond);
+        bond.status = BondStatus::Dissolved;
+        env.storage().instance().set(&DataKey::Bond(bond_id), &bond);
 
-    env.events().publish(
-        (symbol_short!("bond"), symbol_short!("dissolve")),
-        (bond_id, caller.clone()),
-    );
+        env.events().publish(
+            (symbol_short!("bond"), symbol_short!("dissolve")),
+            (bond_id, caller.clone()),
+        );
 
-    Ok(bond)
+        Ok(bond)
+    })
 }
 
 /// ── get_bond ──────────────────────────────────────────────────────────────

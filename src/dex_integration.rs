@@ -6,7 +6,10 @@
 
 use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Env, Symbol};
 
-use crate::resource_minter::{get_dex_offer, harvest_resources, next_dex_offer_id, ResourceKey};
+use crate::reentrancy_guard::{with_guard, ReentrancyError};
+use crate::resource_minter::{
+    get_dex_offer, harvest_resources_unguarded, next_dex_offer_id, ResourceKey,
+};
 
 // Re-exported so callers can depend on this module alone.
 pub use crate::resource_minter::{DexOffer, HarvestError, HarvestResult};
@@ -35,7 +38,28 @@ pub enum DexKey {
 /// - [`HarvestError::DexFailure`] if the player already hit the listing cap.
 /// - [`HarvestError::AssetNotHarvested`] if `resource` was not in the harvest.
 /// - plus any error from [`harvest_resources`].
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn harvest_and_list(
+    env: &Env,
+    player: &Address,
+    ship_id: u64,
+    layout: &crate::nebula_explorer::NebulaLayout,
+    resource: &Symbol,
+    min_price: i128,
+) -> Result<(HarvestResult, DexOffer), HarvestError> {
+    with_guard(env, || {
+        harvest_and_list_unguarded(env, player, ship_id, layout, resource, min_price)
+    })
+}
+
+/// Unguarded body of [`harvest_and_list`].
+///
+/// Callers must already hold the reentrancy guard; this exists so a
+/// guarded entry point can compose it without tripping the global lock.
+pub(crate) fn harvest_and_list_unguarded(
     env: &Env,
     player: &Address,
     ship_id: u64,
@@ -55,7 +79,7 @@ pub fn harvest_and_list(
         return Err(HarvestError::DexFailure);
     }
 
-    let harvest_result = harvest_resources(env, ship_id, layout)?;
+    let harvest_result = harvest_resources_unguarded(env, ship_id, layout)?;
 
     let mut listed_amount: u32 = 0;
     for i in 0..harvest_result.resources.len() {
@@ -123,34 +147,40 @@ pub fn harvest_and_list(
 /// Without the `seller` check below this would be a fund-theft bug: the escrow
 /// refund is credited to `caller`, so any address could cancel any live offer
 /// and collect the seller's escrowed units.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn cancel_listing(env: &Env, owner: &Address, offer_id: u64) -> Result<DexOffer, HarvestError> {
-    owner.require_auth();
+    with_guard(env, || {
+        owner.require_auth();
 
-    let mut offer: DexOffer = get_dex_offer(env, offer_id).ok_or(HarvestError::DexFailure)?;
+        let mut offer: DexOffer = get_dex_offer(env, offer_id).ok_or(HarvestError::DexFailure)?;
 
-    if !offer.active || offer.seller != *owner {
-        return Err(HarvestError::DexFailure);
-    }
+        if !offer.active || offer.seller != *owner {
+            return Err(HarvestError::DexFailure);
+        }
 
-    offer.active = false;
-    env.storage()
-        .instance()
-        .set(&ResourceKey::DexOffer(offer_id), &offer);
+        offer.active = false;
+        env.storage()
+            .instance()
+            .set(&ResourceKey::DexOffer(offer_id), &offer);
 
-    // Release the escrow.
-    let balance_key = ResourceKey::ResourceBalance(owner.clone(), offer.asset_id.clone());
-    let balance: u32 = env.storage().instance().get(&balance_key).unwrap_or(0);
-    let refunded = balance
-        .checked_add(offer.amount)
-        .ok_or(HarvestError::PriceOverflow)?;
-    env.storage().instance().set(&balance_key, &refunded);
+        // Release the escrow.
+        let balance_key = ResourceKey::ResourceBalance(owner.clone(), offer.asset_id.clone());
+        let balance: u32 = env.storage().instance().get(&balance_key).unwrap_or(0);
+        let refunded = balance
+            .checked_add(offer.amount)
+            .ok_or(HarvestError::PriceOverflow)?;
+        env.storage().instance().set(&balance_key, &refunded);
 
-    env.events().publish(
-        (symbol_short!("dex"), symbol_short!("canceld")),
-        (offer_id, owner.clone()),
-    );
+        env.events().publish(
+            (symbol_short!("dex"), symbol_short!("canceld")),
+            (offer_id, owner.clone()),
+        );
 
-    Ok(offer)
+        Ok(offer)
+    })
 }
 
 /// Read a DEX offer by ID.
@@ -173,6 +203,14 @@ pub enum DynamicListError {
     PriceUnavailable = 2,
     /// The dynamic price resolved to a non-positive value.
     InvalidPrice = 3,
+    /// A guarded section was re-entered (Issue #472).
+    Reentrancy = 4,
+}
+
+impl From<ReentrancyError> for DynamicListError {
+    fn from(_: ReentrancyError) -> Self {
+        DynamicListError::Reentrancy
+    }
 }
 
 impl From<HarvestError> for DynamicListError {
@@ -194,7 +232,7 @@ impl crate::error_standard::StandardContractError for DynamicListError {
     fn descriptor(self) -> crate::error_standard::ErrorDescriptor {
         use crate::error_standard::ErrorKind;
         let (kind, retryable) = match self {
-            Self::HarvestFailed => (ErrorKind::Conflict, false),
+            Self::HarvestFailed | Self::Reentrancy => (ErrorKind::Conflict, false),
             Self::PriceUnavailable => (ErrorKind::NotFound, true),
             Self::InvalidPrice => (ErrorKind::Validation, false),
         };
@@ -224,6 +262,10 @@ impl crate::error_standard::StandardContractError for DynamicListError {
 ///   price yet.
 /// - [`DynamicListError::HarvestFailed`] for anything [`harvest_and_list`]
 ///   would reject.
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn list_at_market(
     env: &Env,
     player: &Address,
@@ -231,20 +273,22 @@ pub fn list_at_market(
     layout: &crate::nebula_explorer::NebulaLayout,
     resource: &Symbol,
 ) -> Result<(HarvestResult, DexOffer, i128), DynamicListError> {
-    let price = crate::dynamic_pricing::listing_price(env, resource.clone())?;
-    if price <= 0 {
-        return Err(DynamicListError::InvalidPrice);
-    }
+    with_guard(env, || {
+        let price = crate::dynamic_pricing::listing_price(env, resource.clone())?;
+        if price <= 0 {
+            return Err(DynamicListError::InvalidPrice);
+        }
 
-    let result = harvest_and_list(env, player, ship_id, layout, resource, price)
-        .map_err(|err| {
-            env.events().publish(
-                (symbol_short!("dlist"), symbol_short!("failed")),
-                (resource.clone(), err as u32),
-            );
-            DynamicListError::HarvestFailed
-        })?;
+        let result = harvest_and_list_unguarded(env, player, ship_id, layout, resource, price)
+            .map_err(|err| {
+                env.events().publish(
+                    (symbol_short!("dlist"), symbol_short!("failed")),
+                    (resource.clone(), err as u32),
+                );
+                DynamicListError::HarvestFailed
+            })?;
 
-    Ok((result.0, result.1, price))
+        Ok((result.0, result.1, price))
+    })
 }
 

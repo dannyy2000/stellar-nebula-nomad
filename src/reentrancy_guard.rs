@@ -22,6 +22,41 @@
 //! The lock lives in instance storage, so it is automatically rolled back if
 //! the transaction panics — a failed guarded call can never leave the contract
 //! permanently locked.
+//!
+//! ## Protection pattern (Issue #472)
+//!
+//! Every entry point that moves value or mutates balances follows the same
+//! rules. New entry points in these modules should follow them too.
+//!
+//! 1. **Guard the whole entry point.** The lock is acquired *before*
+//!    `require_auth`, because authorizing a custom-account address runs that
+//!    account's `__check_auth` — an external call that could otherwise call
+//!    back in before any state is written.
+//! 2. **Checks → effects → interactions.** Inside the guard, validate first,
+//!    write every state change next, and only then emit events or call out.
+//!    Nothing is read back after an interaction.
+//! 3. **One lock, entry points only.** The lock is a single global flag, so a
+//!    guarded function cannot call another guarded function. Where one entry
+//!    point composes another (e.g. `dex_integration::list_at_market` →
+//!    `harvest_and_list` → `resource_minter::harvest_resources`), the reusable
+//!    body lives in a `*_unguarded` function and the public wrapper is the only
+//!    place that takes the lock.
+//! 4. **A rejected re-entry never releases the outer lock.** [`with_guard`]
+//!    returns before running its body when [`acquire`] fails, so the caller
+//!    that actually holds the lock is the only one that releases it.
+//!
+//! Guarded entry points: `resource_minter` (`mint_resource`,
+//! `harvest_resources`, `auto_list_on_dex`), `dex_integration`
+//! (`harvest_and_list`, `cancel_listing`, `list_at_market`), `trading` (limit
+//! orders, trade recording, pool creation, liquidity and swaps),
+//! `escrow_trader` (initiate, confirm, complete, cancel), `nomad_bonding`
+//! (bond lifecycle, essence accrual, yield claims) and `treasure_vault`
+//! (deposit, claim).
+//!
+//! The Soroban host already refuses to re-enter a contract that is on the call
+//! stack. This guard is defence in depth: it also covers same-contract
+//! composition and keeps the invariant explicit in code and tests should that
+//! host behaviour or the contract topology ever change.
 
 use soroban_sdk::{contracterror, contracttype, Env};
 
@@ -135,6 +170,11 @@ mod tests {
             with_guard(&env, || Ok(42u32))
         }
 
+        /// A guarded call whose body fails.
+        pub fn failing(env: Env) -> Result<u32, ReentrancyError> {
+            with_guard(&env, || Err(ReentrancyError::ReentrantCall))
+        }
+
         /// Exposes the lock flag so tests can assert it is released.
         pub fn locked(env: Env) -> bool {
             is_locked(&env)
@@ -161,5 +201,35 @@ mod tests {
         assert_eq!(client.locked(), false);
         // A subsequent call still succeeds (the guard is not stuck).
         assert_eq!(client.single(), 42);
+    }
+
+    #[test]
+    fn releases_lock_when_body_errors() {
+        let env = Env::default();
+        let id = env.register(GuardTestContract, ());
+        let client = GuardTestContractClient::new(&env, &id);
+
+        assert!(client.try_failing().is_err());
+        assert!(!client.locked());
+        assert_eq!(client.single(), 42);
+    }
+
+    #[test]
+    fn rejected_reentry_does_not_release_outer_lock() {
+        let env = Env::default();
+        let id = env.register(GuardTestContract, ());
+
+        env.as_contract(&id, || {
+            acquire(&env).expect("lock should be free");
+
+            // The nested attempt is rejected...
+            let nested: Result<(), ReentrancyError> = with_guard(&env, || Ok(()));
+            assert_eq!(nested, Err(ReentrancyError::ReentrantCall));
+            // ...and must not have freed the lock the outer caller still holds.
+            assert!(is_locked(&env));
+
+            release(&env);
+            assert!(!is_locked(&env));
+        });
     }
 }

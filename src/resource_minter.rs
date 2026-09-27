@@ -11,6 +11,7 @@
 use crate::nebula_explorer::{CellType, NebulaLayout};
 use crate::nebula_gen::{NebulaError as NebulaGenError, NebulaGen};
 use crate::rate_limiter::{check_rate_limit, Operation, RateLimitError};
+use crate::reentrancy_guard::{with_guard, ReentrancyError};
 use crate::economics::anti_whale::{process_anti_whale_action, AntiWhaleError};
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 
@@ -114,6 +115,8 @@ pub enum MinterError {
     InsufficientBalance = 205,
     /// Requested amount exceeds anti-whale daily operation cap (Issue #455).
     DailyCapExceeded = 206,
+    /// A guarded section was re-entered (Issue #472).
+    Reentrancy = 207,
 }
 
 impl From<AntiWhaleError> for MinterError {
@@ -133,6 +136,7 @@ impl crate::error_standard::StandardContractError for MinterError {
             Self::InvalidAmount => (ErrorKind::Validation, false),
             Self::RateLimitExceeded => (ErrorKind::ResourceLimit, true),
             Self::NoLayoutForShip | Self::NoResourceAtAnomaly => (ErrorKind::NotFound, false),
+            Self::Reentrancy => (ErrorKind::Conflict, false),
             Self::ArithmeticOverflow | Self::InsufficientBalance | Self::DailyCapExceeded => {
                 (ErrorKind::ResourceLimit, false)
             }
@@ -152,6 +156,12 @@ impl From<RateLimitError> for MinterError {
     }
 }
 
+impl From<ReentrancyError> for MinterError {
+    fn from(_: ReentrancyError) -> Self {
+        MinterError::Reentrancy
+    }
+}
+
 // ── Contract ─────────────────────────────────────────────────
 #[contract]
 pub struct ResourceMinterContract;
@@ -161,6 +171,10 @@ impl ResourceMinterContract {
     /// Mint `amount` units of `resource_type` for `caller`.
     ///
     /// Rate-limited to prevent spam (Issue #175).
+    ///
+    /// # Reentrancy
+    /// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+    /// `require_auth` check, so a nested call observes the lock and is rejected.
     pub fn mint_resource(
         env: &Env,
         caller: Address,
@@ -169,68 +183,71 @@ impl ResourceMinterContract {
         resource_type: ResourceType,
         amount: u64,
     ) -> Result<ResourceRecord, MinterError> {
-        // ── Auth ───────────────────────────────────────────────
-        caller.require_auth();
+        with_guard(env, || {
+            // ── Auth ───────────────────────────────────────────────
+            caller.require_auth();
 
-        // ── Rate limit check (Issue #175) ──────────────────────
-        check_rate_limit(env, &caller, Operation::ResourceMinting).map_err(MinterError::from)?;
+            // ── Rate limit check (Issue #175) ──────────────────────
+            check_rate_limit(env, &caller, Operation::ResourceMinting)
+                .map_err(MinterError::from)?;
 
-        // ── Basic validation ───────────────────────────────────
-        if amount == 0 {
-            return Err(MinterError::InvalidAmount);
-        }
+            // ── Basic validation ───────────────────────────────────
+            if amount == 0 {
+                return Err(MinterError::InvalidAmount);
+            }
 
-        // ── Confirm anomaly exists for this ship ───────────────
-        NebulaGen::has_anomaly(env.clone(), ship_id, anomaly_index).map_err(|e| match e {
-            NebulaGenError::LayoutNotFound => MinterError::NoLayoutForShip,
-            NebulaGenError::AnomalyOutOfBounds => MinterError::NoResourceAtAnomaly,
-            _ => MinterError::NoLayoutForShip,
-        })?;
+            // ── Confirm anomaly exists for this ship ───────────────
+            NebulaGen::has_anomaly(env.clone(), ship_id, anomaly_index).map_err(|e| match e {
+                NebulaGenError::LayoutNotFound => MinterError::NoLayoutForShip,
+                NebulaGenError::AnomalyOutOfBounds => MinterError::NoResourceAtAnomaly,
+                _ => MinterError::NoLayoutForShip,
+            })?;
 
-        // ── Anti-Whale check (Issue #455) ─────────────────────
-        let (effective_amount, _progressive_fee) =
-            process_anti_whale_action(env, &caller, amount)?;
+            // ── Anti-Whale check (Issue #455) ─────────────────────
+            let (effective_amount, _progressive_fee) =
+                process_anti_whale_action(env, &caller, amount)?;
 
-        // ── Update balances (checked: Issue #239) ──────────────
-        let balance_key = MinterKey::Balance(caller.clone(), resource_type.clone());
-        let current: u64 = env.storage().persistent().get(&balance_key).unwrap_or(0);
-        let new_balance = current
-            .checked_add(effective_amount)
-            .ok_or(MinterError::ArithmeticOverflow)?;
-        env.storage().persistent().set(&balance_key, &new_balance);
+            // ── Update balances (checked: Issue #239) ──────────────
+            let balance_key = MinterKey::Balance(caller.clone(), resource_type.clone());
+            let current: u64 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+            let new_balance = current
+                .checked_add(effective_amount)
+                .ok_or(MinterError::ArithmeticOverflow)?;
+            env.storage().persistent().set(&balance_key, &new_balance);
 
-        let supply_key = MinterKey::TotalSupply(resource_type.clone());
-        let supply: u64 = env.storage().persistent().get(&supply_key).unwrap_or(0);
-        let new_supply = supply
-            .checked_add(effective_amount)
-            .ok_or(MinterError::ArithmeticOverflow)?;
-        env.storage().persistent().set(&supply_key, &new_supply);
+            let supply_key = MinterKey::TotalSupply(resource_type.clone());
+            let supply: u64 = env.storage().persistent().get(&supply_key).unwrap_or(0);
+            let new_supply = supply
+                .checked_add(effective_amount)
+                .ok_or(MinterError::ArithmeticOverflow)?;
+            env.storage().persistent().set(&supply_key, &new_supply);
 
-        // ── Cumulative mint counter (Issue #281) ───────────────
-        // Unlike TotalSupply this is monotonic — burning reduces supply but
-        // never the historical mint total, which is the denominator of the
-        // deflation rate.
-        let minted_key = MinterKey::TotalMinted(resource_type.clone());
-        let minted: u64 = env.storage().persistent().get(&minted_key).unwrap_or(0);
-        let new_minted = minted
-            .checked_add(effective_amount)
-            .ok_or(MinterError::ArithmeticOverflow)?;
-        env.storage().persistent().set(&minted_key, &new_minted);
+            // ── Cumulative mint counter (Issue #281) ───────────────
+            // Unlike TotalSupply this is monotonic — burning reduces supply but
+            // never the historical mint total, which is the denominator of the
+            // deflation rate.
+            let minted_key = MinterKey::TotalMinted(resource_type.clone());
+            let minted: u64 = env.storage().persistent().get(&minted_key).unwrap_or(0);
+            let new_minted = minted
+                .checked_add(effective_amount)
+                .ok_or(MinterError::ArithmeticOverflow)?;
+            env.storage().persistent().set(&minted_key, &new_minted);
 
-        let record = ResourceRecord {
-            owner: caller.clone(),
-            resource_type: resource_type.clone(),
-            amount: effective_amount,
-            minted_at: env.ledger().timestamp(),
-        };
+            let record = ResourceRecord {
+                owner: caller.clone(),
+                resource_type: resource_type.clone(),
+                amount: effective_amount,
+                minted_at: env.ledger().timestamp(),
+            };
 
-        // ── Emit event ─────────────────────────────────────────
-        env.events().publish(
-            (symbol_short!("Minter"), symbol_short!("minted")),
-            (caller, resource_type, effective_amount),
-        );
+            // ── Emit event ─────────────────────────────────────────
+            env.events().publish(
+                (symbol_short!("Minter"), symbol_short!("minted")),
+                (caller, resource_type, effective_amount),
+            );
 
-        Ok(record)
+            Ok(record)
+        })
     }
 
     /// Query the balance of `owner` for `resource_type`.
@@ -510,6 +527,8 @@ pub enum HarvestError {
     DexFailure = 6,
     /// Seller does not hold enough of `resource` to cover the listing.
     InsufficientBalance = 7,
+    /// A guarded section was re-entered (Issue #472).
+    Reentrancy = 8,
 }
 
 impl crate::error_standard::StandardContractError for HarvestError {
@@ -520,6 +539,7 @@ impl crate::error_standard::StandardContractError for HarvestError {
             Self::EmptyHarvest | Self::InvalidPrice => (ErrorKind::Validation, false),
             Self::PriceOverflow | Self::DexFailure => (ErrorKind::Internal, false),
             Self::InsufficientBalance => (ErrorKind::ResourceLimit, false),
+            Self::Reentrancy => (ErrorKind::Conflict, false),
         };
         crate::error_standard::ErrorDescriptor {
             module: "resource_minter",
@@ -527,6 +547,12 @@ impl crate::error_standard::StandardContractError for HarvestError {
             kind,
             retryable,
         }
+    }
+}
+
+impl From<ReentrancyError> for HarvestError {
+    fn from(_: ReentrancyError) -> Self {
+        HarvestError::Reentrancy
     }
 }
 
@@ -584,7 +610,23 @@ pub fn credit_resource_balance(
 ///
 /// # Errors
 /// See [`HarvestError`].
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn harvest_resources(
+    env: &Env,
+    ship_id: u64,
+    layout: &NebulaLayout,
+) -> Result<HarvestResult, HarvestError> {
+    with_guard(env, || harvest_resources_unguarded(env, ship_id, layout))
+}
+
+/// Unguarded body of [`harvest_resources`].
+///
+/// Callers must already hold the reentrancy guard; this exists so a
+/// guarded entry point can compose it without tripping the global lock.
+pub(crate) fn harvest_resources_unguarded(
     env: &Env,
     ship_id: u64,
     layout: &NebulaLayout,
@@ -643,55 +685,61 @@ pub fn harvest_resources(
 ///
 /// # Errors
 /// See [`HarvestError`].
+///
+/// # Reentrancy
+/// Runs entirely inside [`crate::reentrancy_guard::with_guard`], including the
+/// `require_auth` check, so a nested call observes the lock and is rejected.
 pub fn auto_list_on_dex(
     env: &Env,
     player: &Address,
     resource: &Symbol,
     min_price: i128,
 ) -> Result<DexOffer, HarvestError> {
-    player.require_auth();
+    with_guard(env, || {
+        player.require_auth();
 
-    if min_price <= 0 {
-        return Err(HarvestError::InvalidPrice);
-    }
+        if min_price <= 0 {
+            return Err(HarvestError::InvalidPrice);
+        }
 
-    let amount = resource_balance(env, player, resource);
-    if amount == 0 {
-        return Err(HarvestError::InsufficientBalance);
-    }
+        let amount = resource_balance(env, player, resource);
+        if amount == 0 {
+            return Err(HarvestError::InsufficientBalance);
+        }
 
-    // Escrow: clear the balance this offer is about to sell. The `0u32` suffix
-    // matters — an unsuffixed `0` would infer as `i32` and write a value the
-    // `u32` reads in `resource_balance` cannot convert back from.
-    let balance_key = ResourceKey::ResourceBalance(player.clone(), resource.clone());
-    env.storage().instance().set(&balance_key, &0u32);
+        // Escrow: clear the balance this offer is about to sell. The `0u32` suffix
+        // matters — an unsuffixed `0` would infer as `i32` and write a value the
+        // `u32` reads in `resource_balance` cannot convert back from.
+        let balance_key = ResourceKey::ResourceBalance(player.clone(), resource.clone());
+        env.storage().instance().set(&balance_key, &0u32);
 
-    let offer_id = next_dex_offer_id(env)?;
-    let offer = DexOffer {
-        offer_id,
-        seller: player.clone(),
-        asset_id: resource.clone(),
-        amount,
-        min_price,
-        active: true,
-    };
-
-    env.storage()
-        .instance()
-        .set(&ResourceKey::DexOffer(offer_id), &offer);
-
-    env.events().publish(
-        (symbol_short!("dex"), symbol_short!("listed")),
-        (
+        let offer_id = next_dex_offer_id(env)?;
+        let offer = DexOffer {
             offer_id,
-            player.clone(),
-            resource.clone(),
+            seller: player.clone(),
+            asset_id: resource.clone(),
             amount,
             min_price,
-        ),
-    );
+            active: true,
+        };
 
-    Ok(offer)
+        env.storage()
+            .instance()
+            .set(&ResourceKey::DexOffer(offer_id), &offer);
+
+        env.events().publish(
+            (symbol_short!("dex"), symbol_short!("listed")),
+            (
+                offer_id,
+                player.clone(),
+                resource.clone(),
+                amount,
+                min_price,
+            ),
+        );
+
+        Ok(offer)
+    })
 }
 
 /// Read a DEX offer by ID.

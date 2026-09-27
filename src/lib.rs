@@ -128,6 +128,8 @@ mod gas_optimized_compute;
 // Cross-contract safety: reentrancy guard + composable call helpers.
 mod nomad_bonding;
 mod reentrancy_guard;
+#[cfg(test)]
+mod reentrancy_attack_tests;
 mod composability_examples;
 mod input_validation;
 mod quest_system;
